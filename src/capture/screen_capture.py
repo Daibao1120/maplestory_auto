@@ -58,7 +58,7 @@ class ScreenCapture:
     """
 
     def __init__(self, backend="mss", window_title=None, region=None,
-                 dry_run=False, synthetic_size=(768, 1024)):
+                 dry_run=False, synthetic_size=(865, 1370)):
         self.backend = backend
         self.window_title = window_title
         self._region: Optional[Region] = Region(*region) if region else None
@@ -67,6 +67,9 @@ class ScreenCapture:
         # 無顯示環境（例如 CI / 無頭沙箱）下空轉測試。
         self.dry_run = dry_run
         self.synthetic_size = synthetic_size  # (height, width)
+        # dry_run 時可注入自訂畫面產生器（回傳一張 BGR frame）：
+        # 例如真實截圖或合成場景。None 則回傳全黑畫面。
+        self.scene_provider = None
 
     # ---- 生命週期 ----
     def _ensure_backend(self):
@@ -99,6 +102,8 @@ class ScreenCapture:
         dry_run 模式回傳全黑合成畫面（不需 mss / 螢幕），供無遊戲環境測試主迴圈。
         """
         if self.dry_run:
+            if self.scene_provider is not None:
+                return self.scene_provider()
             if np is None:
                 return None  # 連 numpy 都沒有時回傳 None；下游辨識皆為 stub，可容忍
             h, w = self.synthetic_size

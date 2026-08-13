@@ -1,20 +1,24 @@
 """主迴圈引擎。
 
-負責把各層組裝起來並持續執行：
-    擷取畫面 → 生存維持（補水）→ rune 偵測 → 執行 routine 當前步驟。
+每一圈：擷取畫面 → 感知（小地圖玩家、HP/MP、鱷魚）→ 決策/行動：
+    1) 生存維持（低血/藍就喝水）
+    2) rune 偵測
+    3) 打怪優先：偵測到鱷魚 → 面向怪較多的一側 → 弓箭手遠程放技能連射（射程外則走近）
+    4) 沒有怪 → 沿平台左右巡邏，到邊界前折返（避免走進水裡）
 
-本檔提供可運行的骨架與清楚的擴充點；核心決策（走位、瞄準、rune）以 TODO 佔位。
+dry-run 會把整條「感知 → 決策」印出來但不送實體鍵；可用 --demo-image 餵真實截圖。
+核心 CV 已實作，實際數值（ROI/HSV/鍵位/巡邏邊界）由 settings 設定並需在遊戲內校準。
 """
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import List, Optional
 
 from src.capture import ScreenCapture
-from src.vision import TemplateMatcher, MinimapLocator, HealthBarDetector
+from src.vision import TemplateMatcher, MinimapLocator, HealthBarDetector, MonsterDetector
 from src.input import InputController
 from src.routine import Routine, load_routine
-from src.commands import CommandBook, CommandContext
+from src.commands import CommandBook, CommandContext, plan_ranged, decision_to_actions
 from src.rune import RuneDetector, RuneSolver
 
 
@@ -23,12 +27,14 @@ class BotEngine:
 
     參數：
         config: 已載入的設定 dict（見 config/settings.example.yaml）。
-        dry_run: True 時輸入層只記錄不實際送鍵，便於在無遊戲環境測試流程。
+        dry_run: True 時輸入層只記錄不實際送鍵、擷取層改用合成/指定畫面。
+        demo_image: dry_run 時可指定一張截圖當畫面來源（在真畫面上偵測鱷魚、讀 HP/MP）。
     """
 
-    def __init__(self, config, dry_run=False):
+    def __init__(self, config, dry_run=False, demo_image=None):
         self.config = config or {}
         self.dry_run = dry_run
+        self.demo_image = demo_image
         self.running = False
 
         # 各層元件（於 setup() 建立）
@@ -36,20 +42,35 @@ class BotEngine:
         self.matcher: Optional[TemplateMatcher] = None
         self.minimap: Optional[MinimapLocator] = None
         self.health: Optional[HealthBarDetector] = None
+        self.monster: Optional[MonsterDetector] = None
         self.controller: Optional[InputController] = None
         self.routine: Optional[Routine] = None
         self.command_book: Optional[CommandBook] = None
         self.rune_detector: Optional[RuneDetector] = None
         self.rune_solver: Optional[RuneSolver] = None
 
+        # 打怪 / 巡邏參數（於 setup() 從 config 讀入）
+        self._attack_key = "ctrl"
+        self._attack_range = 700
+        self._combo = 3
+        self._patrol_left = 40
+        self._patrol_right = 175
+        self._patrol_step = 0.35
+        self._patrol_dir = "right"
+
         self._last_potion_ts = 0.0
-        self._point_index = 0
+        self._last_player = None
+        self._last_monsters: List = []
+        self._demo_source = ""
 
     # ---- 初始化 ----
     def setup(self):
         """依設定建立各層元件（不啟動遊戲，只準備物件）。"""
         cfg = self.config
         win = cfg.get("window", {})
+        vision_cfg = cfg.get("vision", {})
+        combat = cfg.get("combat", {})
+        keys = cfg.get("keys", {})
 
         self.capture = ScreenCapture(
             backend=cfg.get("capture", {}).get("backend", "mss"),
@@ -57,14 +78,22 @@ class BotEngine:
             region=win.get("region"),
             dry_run=self.dry_run,
         )
-        vision_cfg = cfg.get("vision", {})
         self.matcher = TemplateMatcher(threshold=vision_cfg.get("template_match_threshold", 0.8))
         self.minimap = MinimapLocator(vision_cfg.get("minimap"))
         self.health = HealthBarDetector(vision_cfg.get("health_bar"))
+        self.monster = MonsterDetector(vision_cfg.get("monster"))
         self.controller = InputController(cfg.get("humanize"), dry_run=self.dry_run)
         self.command_book = CommandBook()
         self.rune_detector = RuneDetector(cfg.get("rune"))
         self.rune_solver = RuneSolver()
+
+        # 打怪 / 巡邏參數
+        self._attack_key = combat.get("attack_key") or keys.get("attack", "ctrl")
+        self._attack_range = int(combat.get("attack_range_px", 700))
+        self._combo = int(combat.get("combo", 3))
+        self._patrol_left = int(combat.get("patrol_left_x", 40))
+        self._patrol_right = int(combat.get("patrol_right_x", 175))
+        self._patrol_step = float(combat.get("patrol_step_seconds", 0.35))
 
         routine_path = cfg.get("routine", {}).get("path")
         if routine_path:
@@ -72,18 +101,47 @@ class BotEngine:
                 self.routine = load_routine(routine_path)
             except FileNotFoundError:
                 print(f"[警告] 找不到路線檔：{routine_path}，將以空路線啟動。")
+
+        if self.dry_run:
+            self._setup_dry_run_scene(vision_cfg)
+        else:
+            self.monster.load_templates()  # 從 template_dir 載入你的鱷魚截圖
         return self
+
+    def _setup_dry_run_scene(self, vision_cfg):
+        """dry-run 畫面來源：優先用 --demo-image 的真實截圖，否則用合成場景。"""
+        frame = None
+        if self.demo_image:
+            try:
+                import cv2  # 延遲載入
+                frame = cv2.imread(self.demo_image)
+            except Exception:
+                frame = None
+
+        if frame is not None:
+            self.capture.scene_provider = (lambda f=frame: f)
+            self.monster.load_templates()  # 真實鱷魚模板
+            self._demo_source = f"真實截圖：{self.demo_image}"
+        else:
+            from src.vision.synthetic import build_demo
+            demo = build_demo(vision_cfg)
+            if demo is not None:
+                self.capture.scene_provider = (lambda d=demo: d.frame)
+                for name, img in demo.monster_templates.items():
+                    self.monster.add_template(name, img)
+                self._demo_source = "合成場景（未指定 --demo-image）"
+            else:
+                self._demo_source = "全黑畫面（缺 cv2/numpy）"
 
     # ---- 主迴圈 ----
     def start(self, max_loops=None):
-        """啟動主迴圈，直到 stop() 被呼叫、達到 max_loops、或發生 KeyboardInterrupt。
-
-        參數 max_loops：限制迴圈次數（None = 無限）；用於 dry-run 空轉測試。
-        """
+        """啟動主迴圈，直到 stop()、達到 max_loops、或 KeyboardInterrupt。"""
         if self.capture is None:
             self.setup()
         self.running = True
-        fps = self.config.get("capture", {}).get("fps_limit", 15)
+        if self.dry_run and self._demo_source:
+            print(f"[資訊] dry-run 畫面來源：{self._demo_source}")
+        fps = self.config.get("capture", {}).get("fps_limit", 12)
         frame_interval = 1.0 / max(1, fps)
 
         loops = 0
@@ -92,21 +150,31 @@ class BotEngine:
                 t0 = time.time()
                 frame = self.capture.grab()
 
-                if self.dry_run:
-                    label = (self.routine.points[self._point_index].label
-                             if self.routine and self.routine.points else "（無路線）")
-                    print(f"[loop {loops + 1}] 目前定位點：{label}")
+                # 感知
+                player_mm = self.minimap.locate_player(frame)
+                hp = self.health.read_hp_ratio(frame)
+                mp = self.health.read_mp_ratio(frame)
+                monsters = self.monster.detect(frame)
+                player_screen = self._player_screen(frame)
+                self._last_player, self._last_monsters = player_mm, monsters
 
-                self._maintain_survival(frame)
+                if self.dry_run:
+                    title = self.config.get("window", {}).get("title", "")
+                    pstr = f"{player_mm}" if player_mm else "偵測不到"
+                    print(f"[loop {loops + 1}] 視窗:「{title}」 | 玩家(小地圖):{pstr}  "
+                          f"HP:{hp:.0%}  MP:{mp:.0%}  鱷魚:{len(monsters)}")
+
+                # 決策 / 行動
+                self._maintain_survival(frame, hp, mp)
                 self._handle_rune(frame)
-                self._step_routine(frame)
+                if not self._combat(player_screen, monsters):
+                    self._patrol(player_mm)
 
                 loops += 1
                 if max_loops is not None and loops >= max_loops:
                     self.running = False
                     break
 
-                # 控制迴圈頻率，避免 CPU 過載
                 elapsed = time.time() - t0
                 if elapsed < frame_interval:
                     time.sleep(frame_interval - elapsed)
@@ -121,18 +189,47 @@ class BotEngine:
         if self.capture is not None:
             self.capture.close()
 
-    # ---- 各階段（核心邏輯以 TODO 佔位）----
-    def _maintain_survival(self, frame):
-        """依 HP/MP 比例補水（含冷卻時間）。"""
+    # ---- 感知輔助 ----
+    def _player_screen(self, frame):
+        """角色在畫面上的座標：優先用 combat.player_screen_anchor，否則取畫面中央。"""
+        a = self.config.get("combat", {}).get("player_screen_anchor")
+        if a:
+            return (int(a[0]), int(a[1]))
+        if frame is not None and hasattr(frame, "shape"):
+            h, w = frame.shape[:2]
+            return (w // 2, h // 2)
+        return (0, 0)
+
+    def _make_ctx(self, frame):
+        return CommandContext(
+            controller=self.controller,
+            vision={"matcher": self.matcher, "minimap": self.minimap,
+                    "health": self.health, "monster": self.monster, "frame": frame},
+            config=self.config,
+        )
+
+    # ---- 各階段 ----
+    def _maintain_survival(self, frame, hp=None, mp=None):
+        """依 HP/MP 比例補水（含冷卻時間）。hp/mp 可由呼叫端預先算好傳入。"""
         surv = self.config.get("survival", {})
         keys = self.config.get("keys", {})
+        if hp is None:
+            hp = self.health.read_hp_ratio(frame)
+        if mp is None:
+            mp = self.health.read_mp_ratio(frame)
         now = time.time()
         if now - self._last_potion_ts < surv.get("potion_cooldown", 1.0):
             return
-        if self.health.read_hp_ratio(frame) < surv.get("hp_threshold", 0.5):
+        hp_thr = surv.get("hp_threshold", 0.5)
+        mp_thr = surv.get("mp_threshold", 0.3)
+        if hp < hp_thr:
+            if self.dry_run:
+                print(f"        ↳ 決策：HP {hp:.0%} < {hp_thr:.0%} → 喝血({keys.get('hp_potion', 'delete')})")
             self.controller.tap(keys.get("hp_potion", "delete"))
             self._last_potion_ts = now
-        elif self.health.read_mp_ratio(frame) < surv.get("mp_threshold", 0.3):
+        elif mp < mp_thr:
+            if self.dry_run:
+                print(f"        ↳ 決策：MP {mp:.0%} < {mp_thr:.0%} → 喝魔({keys.get('mp_potion', 'end')})")
             self.controller.tap(keys.get("mp_potion", "end"))
             self._last_potion_ts = now
 
@@ -141,27 +238,48 @@ class BotEngine:
         if not self.config.get("rune", {}).get("enabled", True):
             return
         if self.rune_detector.detect(frame):
-            # TODO: 先走到 rune 位置，再解謎
             self.rune_solver.solve(frame, self.controller)
 
+    def _combat(self, player_screen, monsters):
+        """打怪：弓箭手遠程定點。有怪回傳 True（已處理），無怪回傳 False。"""
+        if not monsters:
+            return False
+        decision = plan_ranged(player_screen, monsters, self._attack_range)
+        if decision is None:
+            return False
+        if self.dry_run:
+            tx, ty = decision.target.center
+            verb = (f"放技能 {self._attack_key}×{self._combo}" if decision.in_range
+                    else f"走近({decision.facing})")
+            print(f"        ↳ 打怪：偵測到 {decision.count} 隻 → 最近({tx},{ty}) "
+                  f"dx={decision.distance} → 面向{decision.facing} → {verb}")
+        ctx = self._make_ctx(None)
+        for action in decision_to_actions(decision, self._combo):
+            self.command_book.create(action["action"], action.get("args", {})).execute(ctx)
+        return True
+
+    def _patrol(self, player_mm):
+        """沒有怪時沿平台左右巡邏；到折返點就換方向（避免走進水裡）。"""
+        d = self._patrol_dir
+        at_edge = False
+        if player_mm is not None:
+            px = player_mm[0]
+            if px <= self._patrol_left:
+                d, at_edge = "right", True
+            elif px >= self._patrol_right:
+                d, at_edge = "left", True
+            self._patrol_dir = d
+        if self.dry_run:
+            edge = "（到邊界，折返）" if at_edge else ""
+            print(f"        ↳ 無怪 → 沿平台巡邏往{d}{edge}")
+        ctx = self._make_ctx(None)
+        self.command_book.create("approach", {"dir": d, "seconds": self._patrol_step}).execute(ctx)
+
     def _step_routine(self, frame):
-        """執行 routine 目前定位點的所有動作，然後前進到下一點。"""
+        """（保留）依 routine 定位點執行動作；本抓怪流程改用 _patrol，故預設不呼叫。"""
         if not self.routine or not self.routine.points:
             return
-        point = self.routine.points[self._point_index]
-        ctx = CommandContext(
-            controller=self.controller,
-            vision={
-                "matcher": self.matcher,
-                "minimap": self.minimap,
-                "health": self.health,
-                "frame": frame,
-            },
-            config=self.config,
-        )
+        point = self.routine.points[0]
+        ctx = self._make_ctx(frame)
         for action in point.commands:
-            cmd = self.command_book.create(action.get("action"), action.get("args", {}))
-            cmd.execute(ctx)
-
-        # 前進到下一點（循環）
-        self._point_index = (self._point_index + 1) % len(self.routine.points)
+            self.command_book.create(action.get("action"), action.get("args", {})).execute(ctx)

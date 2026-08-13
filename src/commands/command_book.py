@@ -65,12 +65,14 @@ class AttackCommand(Command):
         keys = ctx.config.get("keys", {})
         facing = self.args.get("facing", "right")
         repeat = int(self.args.get("repeat", 1))
-        # 先轉向（TODO：確認角色目前面向以避免多按），再攻擊
+        # 攻擊技能鍵：優先用 combat.attack_key（弓箭手放箭），否則退回 keys.attack
+        attack_key = ctx.config.get("combat", {}).get("attack_key") or keys.get("attack", "ctrl")
+        # 先轉向面對怪物，再放技能連射
         turn_key = keys.get("move_left" if facing == "left" else "move_right")
         if turn_key:
             ctx.controller.tap(turn_key)
         for _ in range(repeat):
-            ctx.controller.tap(keys.get("attack", "ctrl"))
+            ctx.controller.tap(attack_key)
 
 
 class BuffCommand(Command):
@@ -107,9 +109,22 @@ class ChangeChannelCommand(Command):
             ctx.controller.tap(key)
 
 
+class ApproachCommand(Command):
+    """朝指定方向走近一步（打怪時用來靠近尚未進入攻擊距離的目標）。"""
+    name = "approach"
+
+    def execute(self, ctx):
+        keys = ctx.config.get("keys", {})
+        direction = self.args.get("dir", "right")
+        key = keys.get("move_left" if direction == "left" else "move_right")
+        if key:
+            ctx.controller.hold(key, float(self.args.get("seconds", 0.2)))
+
+
 COMMAND_REGISTRY: Dict[str, Type[Command]] = {
     cls.name: cls
-    for cls in (MoveCommand, AttackCommand, BuffCommand, PotionCommand, ChangeChannelCommand)
+    for cls in (MoveCommand, AttackCommand, BuffCommand, PotionCommand,
+                ChangeChannelCommand, ApproachCommand)
 }
 
 

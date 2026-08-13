@@ -25,10 +25,10 @@ def load_config(path):
         return yaml.safe_load(f) or {}
 
 
-def build_engine(config, dry_run=False):
+def build_engine(config, dry_run=False, demo_image=None):
     """依設定建立並初始化 BotEngine。"""
     from src.engine import BotEngine  # 延遲載入，確保 import src.main 本身很輕量
-    engine = BotEngine(config, dry_run=dry_run)
+    engine = BotEngine(config, dry_run=dry_run, demo_image=demo_image)
     engine.setup()
     return engine
 
@@ -36,9 +36,11 @@ def build_engine(config, dry_run=False):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="楓之谷經典版 圖色辨識自動化腳本")
     parser.add_argument("--config", "-c", default="config/settings.yaml", help="設定檔路徑")
-    parser.add_argument("--dry-run", action="store_true", help="不實際送出按鍵、使用合成畫面（測試用）")
+    parser.add_argument("--dry-run", action="store_true", help="不實際送出按鍵、使用合成/指定畫面（測試用）")
     parser.add_argument("--max-loops", type=int, default=None,
                         help="限制主迴圈次數（預設無限）；dry-run 空轉測試很好用")
+    parser.add_argument("--demo-image", default=None,
+                        help="dry-run 時用這張截圖當畫面來源（在真畫面上偵測鱷魚、讀 HP/MP）")
     return parser.parse_args(argv)
 
 
@@ -65,10 +67,10 @@ def main(argv=None):
         print(f"[錯誤] {e}")
         return 1
 
-    engine = build_engine(config, dry_run=args.dry_run)
-    print(f"[資訊] 已載入路線：{engine.routine.name if engine.routine else '（無）'}")
+    engine = build_engine(config, dry_run=args.dry_run, demo_image=args.demo_image)
+    print(f"[資訊] 地圖：{config.get('game', {}).get('map_name', '（未設定）')}")
     if args.dry_run:
-        print("[資訊] dry-run 模式：使用合成畫面、不送出實體按鍵。")
+        print("[資訊] dry-run 模式：使用合成/指定畫面、不送出實體按鍵。")
     print("[資訊] 開始執行，按 Ctrl+C 可中止。")
 
     try:

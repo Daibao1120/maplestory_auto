@@ -2,17 +2,29 @@
 #  楓之谷經典版自動化腳本 — 設定範例
 #  複製本檔為 settings.yaml 後再依實際情況修改。
 #  （settings.yaml 已列入 .gitignore，不會被提交）
+#
+#  ★ 座標基準：以下所有 ROI / 座標都是「相對遊戲視窗左上角」的像素，
+#    參考視窗大小約 1370x865（含標題列，取自 戰火之地-沼澤地1 的實際截圖）。
+#    你的解析度/視窗大小不同時，請用 tools/capture_template.py 或自己的截圖重新校準。
 # ============================================================
 
 # ---- 目標遊戲視窗 ----
 window:
-  title: "MapleStory"    # 視窗標題關鍵字（部分符合即可）；找不到時退回主螢幕
+  title: "新楓之谷"      # 視窗標題關鍵字（完整為「新楓之谷 · 經典版」）；找不到時退回主螢幕
   region: null           # 手動指定擷取區域 [left, top, width, height]；null = 依視窗自動偵測
+
+# ---- 遊戲/地圖資訊（僅供參考、顯示用）----
+game:
+  map_name: "戰火之地：沼澤地 I"
+  map_id: 107000000        # 墮落城市一帶；寬幅、大致平坦、橫向動線長 → 地面左右橫向巡邏
+  job: "archer"            # 弓箭手（遠程）
+  # 目標怪：鱷魚 Croco Lv32，HP1200 / MP40 / EXP60，移速-40(很慢)、迴避12、可擊退。
+  # → 好瞄準、可風箏/擊退控場；HP1200 需連續多發，攻擊迴圈「對同側持續輸出到怪消失」。
 
 # ---- 螢幕擷取 ----
 capture:
   backend: "mss"         # mss | windows-capture
-  fps_limit: 15          # 擷取頻率上限（每秒張數），避免 CPU 過載
+  fps_limit: 12          # 擷取頻率上限（每秒張數）
 
 # ---- 按鍵綁定（請對應你的遊戲內設定）----
 keys:
@@ -21,56 +33,88 @@ keys:
   up: "up"
   down: "down"
   jump: "alt"
-  attack: "ctrl"           # 主要攻擊技能
-  primary_skill: "a"
+  attack: "ctrl"           # 主要攻擊技能（弓箭手放箭）；實際鍵位由 combat.attack_key 覆蓋
   buff_skills: ["f1", "f2"]
   hp_potion: "delete"      # 補血
   mp_potion: "end"         # 補魔
   change_channel: "pageup" # 換頻（依實際流程調整）
   interact: "space"        # 撿取 / 對話
 
-# ---- 影像辨識閾值 ----
+# ---- 影像辨識（數值取自 戰火之地-沼澤地1 實際截圖）----
 vision:
-  template_match_threshold: 0.80    # 模板匹配相似度門檻 (0~1)，越高越嚴格
+  template_match_threshold: 0.80
+
   minimap:
-    # 小地圖上「自己」的黃點顏色範圍（HSV）
-    player_color_lower: [24, 180, 180]
-    player_color_upper: [40, 255, 255]
-    # 其他玩家 / rune 標記顏色（供偵測是否有人、rune 位置）
-    other_color_lower: [0, 0, 200]
-    other_color_upper: [180, 40, 255]
+    # 小地圖「地圖區域」在畫面中的位置 [left, top, width, height]
+    roi: [18, 131, 205, 74]
+    # 代表「自己」的黃色菱形 HSV 範圍（OpenCV：H 0–179, S/V 0–255）
+    player_color_lower: [24, 150, 150]
+    player_color_upper: [42, 255, 255]
+    min_blob_area: 2                 # 小於此面積(px)的色塊視為雜訊忽略
+    # 其他玩家的橘點顏色（供判斷是否有人佔點）★可再校準
+    other_color_lower: [10, 150, 150]
+    other_color_upper: [20, 255, 255]
+
   health_bar:
-    # 角色頭上血條顏色範圍（HSV），用於在畫面中定位角色
-    hp_color_lower: [0, 120, 120]
+    # HP／MP 條在畫面中的位置 [left, top, width, height]
+    # （用截圖 HP[1010/1322]=76.4%、MP[290/815]=35.6% 反推校準，讀值誤差 <1%）
+    hp_bar_roi: [513, 807, 105, 13]
+    mp_bar_roi: [621, 807, 104, 13]
+    hp_color_lower: [0, 120, 120]    # HP 條紅
     hp_color_upper: [10, 255, 255]
+    mp_color_lower: [95, 120, 120]   # MP 條藍
+    mp_color_upper: [135, 255, 255]
+
+  monster:
+    # 怪物模板資料夾：放你自己的「鱷魚」截圖（可多張不同動作/方向以提高命中率）
+    template_dir: "assets/templates/monsters"
+    match_threshold: 0.62            # matchTemplate 相似度門檻（真實場景通常 0.55~0.7）
+    nms_iou: 0.30                    # NMS IoU 門檻（重疊超過此值視為同一隻）
+    # 搜尋 ROI [left, top, width, height]：限定在平台帶狀區可排除小地圖/UI，
+    # 也能避免把跟在角色旁的「白色兔子（寵物）」誤判。null = 全畫面。★建議校準
+    roi: [0, 430, 1370, 140]
 
 # ---- 生存維持 ----
 survival:
   hp_threshold: 0.50     # HP 低於此比例即補血
-  mp_threshold: 0.30     # MP 低於此比例即補魔
+  mp_threshold: 0.25     # MP 低於此比例即補魔
   potion_cooldown: 1.0   # 兩次補水最短間隔（秒）
+
+# ---- 打怪 / 攻擊（弓箭手：遠程定點射擊，面向怪那側放主力技）----
+# 主力技（Lv30–40 二轉）：獵人(弓)=爆炸箭(範圍濺射+暈眩)；弩手(弩)=貫穿箭(直線穿透+冰凍)。
+# → 面向鱷魚那一側站定放技能，一次打一排；對同側持續輸出到怪消失。（箭雨是3轉技，此等級沒有）
+combat:
+  mode: "ranged"          # 遠程定點輸出
+  attack_key: "ctrl"      # 主力技鍵位（已確認 = Ctrl）＝爆炸箭 / 貫穿箭
+  combo: 3                # 每圈連放次數（HP1200 要多發，靠主迴圈持續輸出到怪消失）
+  attack_range_px: 700    # 最近的鱷魚水平距離 <= 此值就放技能，否則走近一步
+  # 地面左右橫向巡邏折返點（小地圖座標的 x）：走到邊界前折返，避免走進水裡 ★需校準
+  patrol_left_x: 40
+  patrol_right_x: 175
+  patrol_step_seconds: 0.35
+  player_screen_anchor: null   # 角色在畫面中的位置 [x,y]；null = 畫面中央
 
 # ---- rune（天使符文）自動解謎 ----
 rune:
   enabled: true
-  detect_interval: 5.0   # 偵測間隔（秒）
+  detect_interval: 5.0
 
 # ---- 行為隨機化（降低機械化特徵，切勿視為防偵測保證）----
 humanize:
-  key_press_min: 0.03    # 按鍵按住最短時間（秒）
-  key_press_max: 0.09    # 最長時間
-  action_delay_min: 0.05 # 動作與動作間最短延遲
-  action_delay_max: 0.18 # 最長延遲
+  key_press_min: 0.03
+  key_press_max: 0.09
+  action_delay_min: 0.05
+  action_delay_max: 0.18
 
-# ---- 路線 ----
+# ---- 路線（沿平台巡邏；打怪優先於 routine）----
 routine:
   path: "config/routines/example.yaml"
 
 # ---- 控制 ----
 control:
-  stop_hotkey: "f12"     # 緊急停止熱鍵
+  stop_hotkey: "f12"
 
 # ---- 日誌 ----
 logging:
-  level: "INFO"          # DEBUG | INFO | WARNING | ERROR
+  level: "INFO"
   file: "logs/bot.log"

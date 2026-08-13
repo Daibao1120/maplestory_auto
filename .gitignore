@@ -58,6 +58,10 @@ logs/
 debug/
 captures/
 
-# 個人截圖 / 模板素材：只保留資料夾結構，不上傳實際圖片
+# 個人截圖 / 模板素材：只保留資料夾結構與說明，不上傳實際圖片（遊戲美術屬個人素材）
 assets/templates/*
 !assets/templates/.gitkeep
+!assets/templates/monsters/
+assets/templates/monsters/*
+!assets/templates/monsters/.gitkeep
+!assets/templates/monsters/README.md

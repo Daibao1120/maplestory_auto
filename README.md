@@ -51,20 +51,23 @@ maplestory-classic-bot/
 │   └── routines/
 │       └── example.yaml        # 範例路線
 ├── src/
-│   ├── main.py                 # 進入點：載入設定 → 啟動 engine
+│   ├── main.py                 # 進入點：載入設定 → 啟動 engine（含 --dry-run/--demo-image）
 │   ├── capture/                # 螢幕擷取（mss / windows-capture 封裝）
-│   ├── vision/                 # 模板匹配、小地圖定位、血條偵測
+│   ├── vision/                 # 模板匹配、小地圖定位、血條讀值、怪物偵測、合成場景
 │   ├── input/                  # 鍵鼠模擬（pydirectinput / SendInput，含隨機延遲）
-│   ├── engine/                 # 主迴圈引擎：串接 capture→vision→input
+│   ├── engine/                 # 主迴圈：感知→(補水/rune/打怪/巡邏)
 │   ├── routine/                # 路線資料模型與載入
-│   ├── commands/               # command book：移動、攻擊、補水、換頻…
+│   ├── commands/               # command book（移動/攻擊/走近…）＋ combat 攻擊決策
 │   └── rune/                   # rune 偵測與解謎（介面 + TODO）
 ├── tools/
 │   └── capture_template.py     # 小工具：框選截圖存成模板素材
 ├── assets/
-│   └── templates/              # 模板素材（.gitignore 排除個人截圖）
+│   └── templates/
+│       └── monsters/           # 放你自己的鱷魚截圖（見該資料夾 README；圖片不進版控）
 └── tests/
-    └── test_smoke.py           # 煙霧測試（import／基本邏輯）
+    ├── test_smoke.py           # 煙霧測試（import／基本邏輯）
+    ├── test_combat.py          # 攻擊決策（純函式）
+    └── test_vision_functional.py  # 以合成影像實跑 OpenCV（模板/小地圖/血條/怪物/整合）
 ```
 
 ---
@@ -124,9 +127,40 @@ python -m src.main --config config\settings.yaml
 
 ---
 
+## 實戰設定：戰火之地・沼澤地 I（弓箭手打鱷魚）
+
+`config/settings.example.yaml` 的預設值取自這張地圖的**實際截圖**校準：
+
+- **視窗**：標題「新楓之谷」（完整為「新楓之谷 · 經典版」）。
+- **地圖**：戰火之地：沼澤地 I（Map ID 107000000），寬幅、大致平坦、橫向動線長 → 移動以**地面左右橫向巡邏**為主，到折返點前掉頭避免走進水裡。
+- **目標怪**：鱷魚 Croco Lv32（HP 1200 / 移速 −40 很慢 / 迴避 12 / 可擊退）。好瞄準、可風箏；HP 高，需要**對同側持續輸出到怪消失**。
+- **攻擊（弓箭手・遠程定點）**：偵測到鱷魚 → **面向怪較多的一側** → 站定放**主力技**連射；一次濺射／穿透打一排。
+  - 主力技（Lv30–40 二轉）：獵人(弓)＝**爆炸箭**（範圍濺射＋約60%暈眩）；弩手(弩)＝**貫穿箭**（直線穿透多隻＋冰凍）。攻擊鍵預設 **Ctrl**（`combat.attack_key`）。
+  - 「箭雨／亂射」是 3 轉技能，這個等級沒有，預設不使用。
+- **命中提醒**：鱷魚命中需求約 44，DEX／命中不足會 **miss**——畫面偵測得到、但實際打不中，請先顧好命中再讓腳本連續輸出。
+- **寵物排除**：畫面中的**白色兔子是寵物**，會跟在角色旁。怪物偵測用「鱷魚模板」比對，天生不會把兔子當鱷魚；另可用 `vision.monster.roi` 限定平台帶再保險。
+
+感知資料流：`小地圖黃點→玩家座標`、`HP/MP 條 ROI→剩餘%`、`鱷魚模板匹配→鱷魚清單`，再交給攻擊/巡邏決策。dry-run（`--demo-image` 餵真截圖）實測輸出範例：
+
+```
+[loop 1] 視窗:「新楓之谷」 | 玩家(小地圖):(140, 12)  HP:76%  MP:36%  鱷魚:2
+        ↳ 打怪：偵測到 2 隻 → 最近(1070,514) dx=385 → 面向right → 放技能 ctrl×3
+```
+
+## 校準 HSV / ROI（換解析度或帳號務必重做）
+
+`settings.example.yaml` 內所有 ROI 都是「相對遊戲視窗左上角」的像素，參考視窗約 1370×865（含標題列）。你的解析度/視窗大小不同時請重新校準：
+
+1. **截一張你自己的遊戲畫面**（同你平常玩的視窗大小）。
+2. **ROI（矩形區域）**：用小畫家/看圖軟體讀出「小地圖地圖區」「HP 條」「MP 條」的 `[left, top, width, height]`，填入 `vision.minimap.roi` 與 `vision.health_bar.hp_bar_roi / mp_bar_roi`。
+   - 小技巧：HP/MP 條寬度可用「已知數值反推」——例如 HP 顯示 1010/1322≈76%，量出紅色填充寬度 ÷ 0.76 就是條總寬。
+3. **HSV 顏色**：若小地圖黃點抓不到、或血條讀值不準，微調對應的 `*_color_lower/upper`（OpenCV 的 H 是 0–179）。
+4. **怪物模板**：把鱷魚截圖放到 `assets/templates/monsters/`（多補不同動作/方向更準），需要時調 `vision.monster.match_threshold`（真實場景常用 0.55~0.70）。
+5. **巡邏邊界**：在遊戲裡走到平台左右端，看小地圖玩家 x 值，填 `combat.patrol_left_x / patrol_right_x`（設在水邊之前，避免掉下去）。
+
 ## 開發狀態
 
-這是一份**可運行的骨架**，重點在清楚的介面與擴充點；打怪 AI、rune 解謎、換頻流程等核心邏輯以 `TODO` 佔位，尚未完整實作。詳見各模組 docstring。
+**已實作並用合成影像＋真實截圖驗證**：小地圖玩家定位、HP/MP 讀值、鱷魚多模板偵測＋NMS、弓箭手攻擊決策、平台巡邏、整條 dry-run 感知→決策。**仍為 TODO**：`windows-capture` 後端、以 ctypes 定位遊戲視窗、rune 解謎的箭頭辨識、上下跳換層。詳見各模組 docstring 與下方「需真遊戲才能定案」清單。
 
 ---
 
