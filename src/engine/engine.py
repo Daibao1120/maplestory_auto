@@ -18,7 +18,9 @@ from src.capture import ScreenCapture
 from src.vision import TemplateMatcher, MinimapLocator, HealthBarDetector, MonsterDetector
 from src.input import InputController
 from src.routine import Routine, load_routine
-from src.commands import CommandBook, CommandContext, plan_ranged, decision_to_actions
+from src.commands import (CommandBook, CommandContext, PlatformState,
+                          plan_ranged, decision_to_actions,
+                          filter_attackable, plan_two_platforms)
 from src.rune import RuneDetector, RuneSolver
 
 
@@ -58,6 +60,12 @@ class BotEngine:
         self._patrol_step = 0.35
         self._patrol_dir = "right"
 
+        # 兩平台輪流清怪（combat.platforms 有設定時啟用）
+        self._platforms = []
+        self._switch_cfg = {}
+        self._attack_y_band = None
+        self._plat_state = PlatformState()
+
         self._last_potion_ts = 0.0
         self._last_player = None
         self._last_monsters: List = []
@@ -94,6 +102,9 @@ class BotEngine:
         self._patrol_left = int(combat.get("patrol_left_x", 40))
         self._patrol_right = int(combat.get("patrol_right_x", 175))
         self._patrol_step = float(combat.get("patrol_step_seconds", 0.35))
+        self._platforms = list(combat.get("platforms") or [])
+        self._switch_cfg = combat.get("platform_switch") or {}
+        self._attack_y_band = combat.get("attack_y_band")
 
         routine_path = cfg.get("routine", {}).get("path")
         if routine_path:
@@ -114,7 +125,10 @@ class BotEngine:
         if self.demo_image:
             try:
                 import cv2  # 延遲載入
-                frame = cv2.imread(self.demo_image)
+                import numpy as np
+                # 不用 cv2.imread：Windows 上遇到中文路徑（如 擷取.PNG）會靜默回傳 None
+                frame = cv2.imdecode(np.fromfile(self.demo_image, dtype=np.uint8),
+                                     cv2.IMREAD_COLOR)
             except Exception:
                 frame = None
 
@@ -158,16 +172,28 @@ class BotEngine:
                 player_screen = self._player_screen(frame)
                 self._last_player, self._last_monsters = player_mm, monsters
 
+                # 同高度帶過濾：箭是水平飛的，別的平台的怪看得到但射不到
+                attackable = filter_attackable(player_screen[1], monsters, self._attack_y_band)
+
                 if self.dry_run:
                     title = self.config.get("window", {}).get("title", "")
                     pstr = f"{player_mm}" if player_mm else "偵測不到"
+                    extra = (f"（同高度帶 {len(attackable)}）"
+                             if self._attack_y_band and len(attackable) != len(monsters) else "")
                     print(f"[loop {loops + 1}] 視窗:「{title}」 | 玩家(小地圖):{pstr}  "
-                          f"HP:{hp:.0%}  MP:{mp:.0%}  鱷魚:{len(monsters)}")
+                          f"HP:{hp:.0%}  MP:{mp:.0%}  鱷魚:{len(monsters)}{extra}")
 
                 # 決策 / 行動
                 self._maintain_survival(frame, hp, mp)
                 self._handle_rune(frame)
-                if not self._combat(player_screen, monsters):
+                acted = self._combat(player_screen, attackable)
+                if self._platforms:
+                    self._plat_state, plan = plan_two_platforms(
+                        player_mm, len(attackable), self._plat_state,
+                        self._platforms, self._switch_cfg)
+                    if not acted:
+                        self._execute_platform_plan(plan)
+                elif not acted:
                     self._patrol(player_mm)
 
                 loops += 1
@@ -258,22 +284,51 @@ class BotEngine:
             self.command_book.create(action["action"], action.get("args", {})).execute(ctx)
         return True
 
-    def _patrol(self, player_mm):
-        """沒有怪時沿平台左右巡邏；到折返點就換方向（避免走進水裡）。"""
+    def _patrol(self, player_mm, left=None, right=None, label=""):
+        """沒有怪時沿平台左右巡邏；到折返點就換方向（避免走進水裡）。
+
+        left/right 可由兩平台邏輯帶入該平台的邊界；未帶則用全域設定。
+        """
+        left = self._patrol_left if left is None else left
+        right = self._patrol_right if right is None else right
         d = self._patrol_dir
         at_edge = False
         if player_mm is not None:
             px = player_mm[0]
-            if px <= self._patrol_left:
+            if px <= left:
                 d, at_edge = "right", True
-            elif px >= self._patrol_right:
+            elif px >= right:
                 d, at_edge = "left", True
             self._patrol_dir = d
         if self.dry_run:
             edge = "（到邊界，折返）" if at_edge else ""
-            print(f"        ↳ 無怪 → 沿平台巡邏往{d}{edge}")
+            where = f"[{label}] " if label else ""
+            print(f"        ↳ 無怪 → {where}沿平台巡邏往{d}{edge}")
         ctx = self._make_ctx(None)
         self.command_book.create("approach", {"dir": d, "seconds": self._patrol_step}).execute(ctx)
+
+    def _execute_platform_plan(self, plan):
+        """執行兩平台決策的單步動作（patrol / approach / jump_move / hold）。"""
+        kind = plan.get("kind")
+        name = plan.get("name", "")
+        st = self._plat_state
+        if kind == "patrol":
+            self._patrol(self._last_player, plan["left"], plan["right"],
+                         label=f"{name} 無怪{st.empty_loops}圈")
+            return
+        if kind == "hold":
+            if self.dry_run:
+                print("        ↳ 小地圖讀不到玩家 → 原地等待")
+            return
+        d = plan.get("dir", "right")
+        if self.dry_run:
+            verb = "邊走邊跳上" if kind == "jump_move" else "走向"
+            print(f"        ↳ 換平台：{verb}「{name}」(往{d}，第{st.move_loops}圈)")
+        ctx = self._make_ctx(None)
+        if kind == "jump_move":
+            self.command_book.create("jump_move", {"dir": d}).execute(ctx)
+        else:
+            self.command_book.create("approach", {"dir": d, "seconds": self._patrol_step}).execute(ctx)
 
     def _step_routine(self, frame):
         """（保留）依 routine 定位點執行動作；本抓怪流程改用 _patrol，故預設不呼叫。"""

@@ -9,15 +9,20 @@ from src.commands.command_book import (
     PotionCommand,
     ChangeChannelCommand,
     ApproachCommand,
+    JumpMoveCommand,
     COMMAND_REGISTRY,
 )
 from src.commands.combat import (
     CombatDecision,
+    PlatformState,
     select_nearest,
     dominant_side,
     plan_attack,
     plan_ranged,
     decision_to_actions,
+    filter_attackable,
+    on_platform,
+    plan_two_platforms,
 )
 
 __all__ = [
@@ -30,11 +35,16 @@ __all__ = [
     "PotionCommand",
     "ChangeChannelCommand",
     "ApproachCommand",
+    "JumpMoveCommand",
     "COMMAND_REGISTRY",
     "CombatDecision",
+    "PlatformState",
     "select_nearest",
     "dominant_side",
     "plan_attack",
     "plan_ranged",
     "decision_to_actions",
+    "filter_attackable",
+    "on_platform",
+    "plan_two_platforms",
 ]

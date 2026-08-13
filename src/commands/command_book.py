@@ -121,10 +121,35 @@ class ApproachCommand(Command):
             ctx.controller.hold(key, float(self.args.get("seconds", 0.2)))
 
 
+class JumpMoveCommand(Command):
+    """朝指定方向邊走邊跳（換平台用：站到平台下方後跳上去）。
+
+    按住方向鍵 → 按跳躍 → 方向鍵續按 carry_seconds 讓跳躍帶水平位移。
+    """
+    name = "jump_move"
+
+    def execute(self, ctx):
+        import time
+        keys = ctx.config.get("keys", {})
+        direction = self.args.get("dir")
+        jump_key = keys.get("jump", "alt")
+        dir_key = (keys.get("move_left" if direction == "left" else "move_right")
+                   if direction else None)
+        if dir_key:
+            ctx.controller.key_down(dir_key)
+        try:
+            ctx.controller.tap(jump_key)
+            if dir_key:
+                time.sleep(float(self.args.get("carry_seconds", 0.45)))
+        finally:
+            if dir_key:
+                ctx.controller.key_up(dir_key)
+
+
 COMMAND_REGISTRY: Dict[str, Type[Command]] = {
     cls.name: cls
     for cls in (MoveCommand, AttackCommand, BuffCommand, PotionCommand,
-                ChangeChannelCommand, ApproachCommand)
+                ChangeChannelCommand, ApproachCommand, JumpMoveCommand)
 }
 
 

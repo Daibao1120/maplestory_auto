@@ -75,3 +75,107 @@ def decision_to_actions(decision, combo=3):
     if decision.in_range:
         return [{"action": "attack", "args": {"facing": decision.facing, "repeat": int(combo)}}]
     return [{"action": "approach", "args": {"dir": decision.facing}}]
+
+
+# ============================================================
+#  兩平台輪流清怪（純函式，方便測試；小地圖座標系）
+#
+#  想法：箭是水平飛的，所以「打得到」= 怪與角色在同一高度帶
+#  （filter_attackable，以畫面 y 差過濾）。目前平台連續 N 圈沒有
+#  可打的怪，就走/跳到另一個平台（plan_two_platforms）。
+# ============================================================
+
+def filter_attackable(player_screen_y, monsters, y_band):
+    """只留「與角色同高度帶」的怪：y_band=[lo, hi]，怪中心y − 角色y 需落在其中。
+
+    箭是水平飛的——別的平台的怪看得到但射不到，濾掉才不會對空放箭。
+    y_band 為 None 時不過濾。
+    """
+    if not y_band:
+        return list(monsters)
+    lo, hi = y_band
+    return [m for m in monsters if lo <= m.center[1] - player_screen_y <= hi]
+
+
+@dataclass(frozen=True)
+class PlatformState:
+    """兩平台巡邏的跨圈狀態（不可變；每圈由 plan_two_platforms 產生新狀態）。"""
+    target: int = 0        # 想待的平台 index
+    empty_loops: int = 0   # 在目標平台上連續沒怪的圈數
+    move_loops: int = 0    # 換平台已花的圈數（防卡死）
+
+
+def on_platform(player_mm, plat, y_tol=1, x_tol=2):
+    """玩家（小地圖座標）是否站在該平台上：x 在範圍內且 y 在平台高度附近。"""
+    if player_mm is None:
+        return False
+    px, py = player_mm
+    left, right = plat["x_range"]
+    return (left - x_tol) <= px <= (right + x_tol) and abs(py - plat["minimap_y"]) <= y_tol
+
+
+def plan_two_platforms(player_mm, n_attackable, state, platforms, switch_cfg=None):
+    """兩平台決策（純函式）。回傳 (新狀態, plan)。
+
+    plan（dict）四種：
+      {"kind": "patrol", "left": …, "right": …, "name": …}   # 在目標平台上巡邏找怪
+      {"kind": "approach", "dir": …, "name": …}              # 前往另一平台：走
+      {"kind": "jump_move", "dir": …, "name": …}             # 前往另一平台：到平台下方，邊走邊跳上去
+      {"kind": "hold", "name": …}                            # 小地圖讀不到玩家 → 原地不動
+    """
+    sw = switch_cfg or {}
+    y_tol = int(sw.get("y_tolerance", 1))
+    x_tol = int(sw.get("x_tolerance", 2))
+    empty_limit = int(sw.get("empty_loops", 8))
+    move_limit = int(sw.get("max_move_loops", 40))
+
+    target = state.target % len(platforms)
+    plat = platforms[target]
+
+    if player_mm is None:
+        # 讀不到自己的位置就不要亂走（可能在跳躍/被畫面遮到），原地等下一圈。
+        return state, {"kind": "hold", "name": plat.get("name", f"平台{target}")}
+
+    if on_platform(player_mm, plat, y_tol, x_tol):
+        # 站在目標平台上：有怪 → 歸零計數交給打怪；沒怪 → 累積計數，滿了換平台。
+        empty = 0 if n_attackable > 0 else state.empty_loops + 1
+        if empty >= empty_limit:
+            new_target = (target + 1) % len(platforms)
+            new_plat = platforms[new_target]
+            return (PlatformState(target=new_target, empty_loops=0, move_loops=1),
+                    _move_plan(player_mm, new_plat, x_tol,
+                               new_plat.get("name", f"平台{new_target}")))
+        left, right = plat["x_range"]
+        return (PlatformState(target=target, empty_loops=empty, move_loops=0),
+                {"kind": "patrol", "left": left, "right": right,
+                 "name": plat.get("name", f"平台{target}")})
+
+    # 不在目標平台上 → 前往。卡太久（跳不上去等）就放棄、改守另一平台。
+    if state.move_loops + 1 >= move_limit:
+        new_target = (target + 1) % len(platforms)
+        return (PlatformState(target=new_target, empty_loops=0, move_loops=0),
+                {"kind": "patrol",
+                 "left": platforms[new_target]["x_range"][0],
+                 "right": platforms[new_target]["x_range"][1],
+                 "name": platforms[new_target].get("name", f"平台{new_target}")})
+
+    name = plat.get("name", f"平台{target}")
+    return (PlatformState(target=target, empty_loops=0, move_loops=state.move_loops + 1),
+            _move_plan(player_mm, plat, x_tol, name))
+
+
+def _move_plan(player_mm, plat, x_tol, name):
+    """產生「前往平台」的單步 plan：先走到定點，再邊走邊跳上去。"""
+    px = player_mm[0]
+    left, right = plat["x_range"]
+    center = (left + right) / 2
+    jump_x = plat.get("jump_x")
+    if jump_x is not None:
+        # 有指定起跳點：先走到 jump_x，再朝平台中心邊走邊跳。
+        if abs(px - jump_x) > x_tol:
+            return {"kind": "approach", "dir": "right" if px < jump_x else "left", "name": name}
+        return {"kind": "jump_move", "dir": "right" if px < center else "left", "name": name}
+    if (left - x_tol) <= px <= (right + x_tol):
+        # 已在平台正下方（x 進範圍但高度不對）→ 邊走邊跳上去。
+        return {"kind": "jump_move", "dir": "right" if px < center else "left", "name": name}
+    return {"kind": "approach", "dir": "right" if px < left else "left", "name": name}

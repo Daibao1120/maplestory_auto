@@ -9,6 +9,7 @@ if ROOT not in sys.path:
 
 from src.commands.combat import (  # noqa: E402
     select_nearest, dominant_side, plan_attack, plan_ranged, decision_to_actions,
+    PlatformState, filter_attackable, on_platform, plan_two_platforms,
 )
 
 
@@ -68,3 +69,88 @@ def test_plan_none_when_no_monsters():
     assert plan_attack((0, 0), [], 10) is None
     assert plan_ranged((0, 0), [], 10) is None
     assert decision_to_actions(None) == []
+
+
+# ============================================================
+#  兩平台輪流清怪（數值取自 擷取.PNG 實測：角色畫面 y≈404，
+#  同平台鱷魚 y≈430(dy+26)、另一平台 y≈488(dy+84)）
+# ============================================================
+
+PLATFORMS = [
+    {"name": "左平台", "x_range": [30, 48], "minimap_y": 38, "jump_x": None},
+    {"name": "右平台", "x_range": [56, 75], "minimap_y": 40, "jump_x": None},
+]
+SWITCH = {"empty_loops": 3, "y_tolerance": 1, "x_tolerance": 2, "max_move_loops": 5}
+
+
+def test_filter_attackable_keeps_same_height_band_only():
+    ms = [FakeDet(472, 430), FakeDet(1295, 488), FakeDet(200, 360)]
+    kept = filter_attackable(404, ms, [0, 60])           # dy = +26 / +84 / -44
+    assert [m.center for m in kept] == [(472, 430)]
+    assert len(filter_attackable(404, ms, None)) == 3    # 不設定 = 不過濾
+
+
+def test_on_platform_checks_x_range_and_height():
+    assert on_platform((40, 38), PLATFORMS[0]) is True
+    assert on_platform((40, 43), PLATFORMS[0]) is False   # 高度不對（在下層土丘）
+    assert on_platform((60, 38), PLATFORMS[0]) is False   # x 超出範圍
+    assert on_platform(None, PLATFORMS[0]) is False
+
+
+def test_two_platforms_patrol_and_reset_when_monsters_present():
+    st = PlatformState(target=0, empty_loops=2)
+    st2, plan = plan_two_platforms((40, 38), 1, st, PLATFORMS, SWITCH)
+    assert plan["kind"] == "patrol" and plan["name"] == "左平台"
+    assert (plan["left"], plan["right"]) == (30, 48)
+    assert st2.empty_loops == 0                          # 有怪 → 計數歸零
+
+
+def test_two_platforms_switch_after_empty_loops():
+    st = PlatformState(target=0, empty_loops=0)
+    for _ in range(2):                                   # 累積到 2，仍在左平台巡邏
+        st, plan = plan_two_platforms((40, 38), 0, st, PLATFORMS, SWITCH)
+        assert plan["kind"] == "patrol"
+    st, plan = plan_two_platforms((40, 38), 0, st, PLATFORMS, SWITCH)
+    assert st.target == 1                                # 第 3 圈沒怪 → 換右平台
+    assert plan["kind"] == "approach" and plan["dir"] == "right"
+
+
+def test_two_platforms_move_walks_then_jumps():
+    st = PlatformState(target=1)
+    # 還在左平台下方 x=50：右平台範圍是 56-75 → 先往右走
+    st, plan = plan_two_platforms((50, 43), 0, st, PLATFORMS, SWITCH)
+    assert plan["kind"] == "approach" and plan["dir"] == "right"
+    # 走到右平台正下方 x=60（高度 43 不對）→ 邊走邊跳上去
+    st, plan = plan_two_platforms((60, 43), 0, st, PLATFORMS, SWITCH)
+    assert plan["kind"] == "jump_move" and plan["dir"] == "right"
+    # 跳上去了（y=40）→ 回到巡邏
+    st, plan = plan_two_platforms((60, 40), 0, st, PLATFORMS, SWITCH)
+    assert plan["kind"] == "patrol" and plan["name"] == "右平台"
+    assert st.move_loops == 0
+
+
+def test_two_platforms_jump_x_walks_to_spot_first():
+    plats = [PLATFORMS[0], {**PLATFORMS[1], "jump_x": 70}]
+    st = PlatformState(target=1)
+    # 在 x=60（已在 x_range 內）但指定起跳點 70 → 先走過去而不是原地跳
+    st, plan = plan_two_platforms((60, 43), 0, st, plats, SWITCH)
+    assert plan["kind"] == "approach" and plan["dir"] == "right"
+    st, plan = plan_two_platforms((69, 43), 0, st, plats, SWITCH)
+    assert plan["kind"] == "jump_move"
+
+
+def test_two_platforms_gives_up_after_max_move_loops():
+    st = PlatformState(target=1)
+    for _ in range(4):
+        st, plan = plan_two_platforms((60, 43), 0, st, PLATFORMS, SWITCH)
+        assert plan["kind"] == "jump_move"
+    st, plan = plan_two_platforms((60, 43), 0, st, PLATFORMS, SWITCH)
+    assert st.target == 0                                # 卡滿 5 圈 → 放棄，回守左平台
+    assert plan["kind"] == "patrol" and plan["name"] == "左平台"
+
+
+def test_two_platforms_holds_when_player_not_located():
+    st = PlatformState(target=0, empty_loops=2, move_loops=0)
+    st2, plan = plan_two_platforms(None, 0, st, PLATFORMS, SWITCH)
+    assert plan["kind"] == "hold"
+    assert st2 == st                                     # 讀不到位置 → 狀態不變
