@@ -69,20 +69,40 @@ maplestory-classic-bot/
 
 ---
 
-## 安裝
+## Windows 快速上手（實際執行環境）
 
-建議使用 Python 3.10+ 與虛擬環境：
+最終在 Windows 上執行（需要 `pydirectinput` 送鍵、擷取實際遊戲畫面）。以下 PowerShell 步驟可直接照做：
 
-```bash
-# 1) 建立並啟用虛擬環境（Windows PowerShell）
+```powershell
+# 1) 進入專案資料夾
+cd D:\indexasia_David\maplestory-classic-bot
+
+# 2) 建立並啟用虛擬環境（需 Python 3.10+）
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# 2) 安裝相依套件
+# 3) 安裝相依套件（含 Windows 專屬的 pydirectinput）
 pip install -r requirements.txt
+
+# 4) 複製設定範例，之後再依你的視窗標題／按鍵微調
+copy config\settings.example.yaml config\settings.yaml
+
+# 5) 空轉測試：用合成畫面、不送實體按鍵，把主迴圈跑 4 圈
+python -m src.main --dry-run --max-loops 4
+
+# 6) 跑測試
+python -m pytest -q
 ```
 
-> 本骨架設計為「**缺套件也能 import**」：未安裝 `mss`／`opencv-python`／`pydirectinput` 時，模組仍可載入，只有在**實際使用**該功能時才會提示安裝。因此可以先跑測試、看架構，再逐步補齊環境。
+`--dry-run` 會使用合成畫面、只印出動作而不真的送鍵，所以**不必開遊戲、也不會亂點你的畫面**，很適合先確認流程是否正確。確認無誤後，開好遊戲、把視窗標題與按鍵填進 `settings.yaml`，再拿掉 `--dry-run` 正式執行：
+
+```powershell
+python -m src.main --config config\settings.yaml
+```
+
+> - 本骨架「**缺套件也能 import**」：未裝 `mss`／`opencv-python`／`pydirectinput` 時模組仍可載入，只有實際使用時才提示安裝，因此可先跑測試、看架構再補環境。
+> - `requirements.txt` 預設**不含** `windows-capture`（進階選用擷取後端）；預設的 `mss` 就能運作。
+> - 在 Linux／macOS 只能安裝跨平台套件（`opencv-python-headless`、`numpy`、`PyYAML`、`mss`、`pytest`）來跑測試與 `--dry-run`；送鍵與真實擷取需在 Windows 上驗證。
 
 ---
 

@@ -57,11 +57,16 @@ class ScreenCapture:
         >>> cap.close()
     """
 
-    def __init__(self, backend="mss", window_title=None, region=None):
+    def __init__(self, backend="mss", window_title=None, region=None,
+                 dry_run=False, synthetic_size=(768, 1024)):
         self.backend = backend
         self.window_title = window_title
         self._region: Optional[Region] = Region(*region) if region else None
         self._sct = None  # mss 實例（延遲建立）
+        # dry_run：不接觸真實螢幕 / mss，改回傳合成畫面，讓主迴圈可在無遊戲、
+        # 無顯示環境（例如 CI / 無頭沙箱）下空轉測試。
+        self.dry_run = dry_run
+        self.synthetic_size = synthetic_size  # (height, width)
 
     # ---- 生命週期 ----
     def _ensure_backend(self):
@@ -89,7 +94,15 @@ class ScreenCapture:
         return self._region
 
     def grab(self):
-        """擷取一張畫面，回傳 BGR 的 numpy.ndarray（H, W, 3）。"""
+        """擷取一張畫面，回傳 BGR 的 numpy.ndarray（H, W, 3）。
+
+        dry_run 模式回傳全黑合成畫面（不需 mss / 螢幕），供無遊戲環境測試主迴圈。
+        """
+        if self.dry_run:
+            if np is None:
+                return None  # 連 numpy 都沒有時回傳 None；下游辨識皆為 stub，可容忍
+            h, w = self.synthetic_size
+            return np.zeros((h, w, 3), dtype=np.uint8)
         self._ensure_backend()
         if np is None:
             raise CaptureError("尚未安裝 numpy。請執行： pip install numpy")

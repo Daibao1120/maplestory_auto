@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 
@@ -35,7 +36,9 @@ def build_engine(config, dry_run=False):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="楓之谷經典版 圖色辨識自動化腳本")
     parser.add_argument("--config", "-c", default="config/settings.yaml", help="設定檔路徑")
-    parser.add_argument("--dry-run", action="store_true", help="不實際送出按鍵，只印出動作（測試用）")
+    parser.add_argument("--dry-run", action="store_true", help="不實際送出按鍵、使用合成畫面（測試用）")
+    parser.add_argument("--max-loops", type=int, default=None,
+                        help="限制主迴圈次數（預設無限）；dry-run 空轉測試很好用")
     return parser.parse_args(argv)
 
 
@@ -45,22 +48,31 @@ def main(argv=None):
     print(" 楓之谷經典版自動化腳本   僅供學習研究，使用風險自負")
     print("=" * 56)
 
+    config_path = args.config
+    if not os.path.exists(config_path):
+        example = os.path.join(os.path.dirname(config_path) or ".", "settings.example.yaml")
+        if args.dry_run and os.path.exists(example):
+            print(f"[提示] 找不到 {config_path}，dry-run 改用範例設定：{example}")
+            config_path = example
+        else:
+            print(f"[錯誤] 找不到設定檔：{config_path}")
+            print("       請先複製 config/settings.example.yaml 為 settings.yaml 再修改。")
+            return 1
+
     try:
-        config = load_config(args.config)
-    except FileNotFoundError:
-        print(f"[錯誤] 找不到設定檔：{args.config}")
-        print("       請先複製 config/settings.example.yaml 為 settings.yaml 再修改。")
-        return 1
+        config = load_config(config_path)
     except RuntimeError as e:
         print(f"[錯誤] {e}")
         return 1
 
     engine = build_engine(config, dry_run=args.dry_run)
     print(f"[資訊] 已載入路線：{engine.routine.name if engine.routine else '（無）'}")
+    if args.dry_run:
+        print("[資訊] dry-run 模式：使用合成畫面、不送出實體按鍵。")
     print("[資訊] 開始執行，按 Ctrl+C 可中止。")
 
     try:
-        engine.start()
+        engine.start(max_loops=args.max_loops)
     except RuntimeError as e:
         print(f"[錯誤] 執行期錯誤：{e}")
         return 1

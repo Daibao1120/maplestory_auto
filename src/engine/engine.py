@@ -55,6 +55,7 @@ class BotEngine:
             backend=cfg.get("capture", {}).get("backend", "mss"),
             window_title=win.get("title"),
             region=win.get("region"),
+            dry_run=self.dry_run,
         )
         vision_cfg = cfg.get("vision", {})
         self.matcher = TemplateMatcher(threshold=vision_cfg.get("template_match_threshold", 0.8))
@@ -74,22 +75,36 @@ class BotEngine:
         return self
 
     # ---- 主迴圈 ----
-    def start(self):
-        """啟動主迴圈，直到 stop() 被呼叫或發生 KeyboardInterrupt。"""
+    def start(self, max_loops=None):
+        """啟動主迴圈，直到 stop() 被呼叫、達到 max_loops、或發生 KeyboardInterrupt。
+
+        參數 max_loops：限制迴圈次數（None = 無限）；用於 dry-run 空轉測試。
+        """
         if self.capture is None:
             self.setup()
         self.running = True
         fps = self.config.get("capture", {}).get("fps_limit", 15)
         frame_interval = 1.0 / max(1, fps)
 
+        loops = 0
         try:
             while self.running:
                 t0 = time.time()
                 frame = self.capture.grab()
 
+                if self.dry_run:
+                    label = (self.routine.points[self._point_index].label
+                             if self.routine and self.routine.points else "（無路線）")
+                    print(f"[loop {loops + 1}] 目前定位點：{label}")
+
                 self._maintain_survival(frame)
                 self._handle_rune(frame)
                 self._step_routine(frame)
+
+                loops += 1
+                if max_loops is not None and loops >= max_loops:
+                    self.running = False
+                    break
 
                 # 控制迴圈頻率，避免 CPU 過載
                 elapsed = time.time() - t0
