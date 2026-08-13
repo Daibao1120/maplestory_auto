@@ -88,13 +88,57 @@ class ScreenCapture:
     def locate_window(self):
         """依 window_title 定位遊戲視窗，回傳 Region 或 None。
 
-        Windows 上可用 ctypes 呼叫 user32.FindWindowW / GetWindowRect 取得視窗矩形；
-        非 Windows（例如測試沙箱）或找不到視窗時，退回既有 region（可能為 None）。
+        以 ctypes EnumWindows + GetWindowTextW 做「標題子字串」比對（設定檔只填
+        關鍵字如「新楓之谷」，實際標題是「新楓之谷：經典版」），矩形優先取
+        DWM ExtendedFrameBounds（= 眼睛看到的視窗，不含 Win10 隱形邊框），
+        退回 GetWindowRect。每次呼叫都重新定位，視窗被移動也追得到。
+        非 Windows 或找不到視窗時，退回既有 region（可能為 None）。
         """
         if not self.window_title or sys.platform != "win32":
             return self._region
-        # TODO: 以 ctypes FindWindowW + GetWindowRect 實作實際定位並更新 self._region。
-        return self._region
+        import ctypes
+        import ctypes.wintypes as wt
+
+        # 讓座標以實體像素為準（螢幕縮放 ≠100% 時 mss 抓的是實體像素）；失敗無妨
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            pass
+
+        user32 = ctypes.windll.user32
+        found = []
+        keyword = self.window_title
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+        def _on_window(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if keyword in buf.value:
+                found.append(hwnd)
+                return False  # 找到就停
+            return True
+
+        user32.EnumWindows(_on_window, 0)
+        if not found:
+            return self._region
+
+        hwnd = found[0]
+        rect = wt.RECT()
+        got = False
+        try:  # DWMWA_EXTENDED_FRAME_BOUNDS = 9
+            got = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)) == 0
+        except Exception:
+            got = False
+        if not got and not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return self._region
+        return Region(rect.left, rect.top,
+                      rect.right - rect.left, rect.bottom - rect.top)
 
     def grab(self):
         """擷取一張畫面，回傳 BGR 的 numpy.ndarray（H, W, 3）。
