@@ -1,0 +1,34 @@
+# ============================================================
+#  範例路線（routine）
+#  一條 routine 由數個「定位點（point）」組成；抵達每個點後，
+#  依序執行該點的 commands（動作指令，對應 command book 中的動作）。
+#  座標以「小地圖像素座標」為準，由 vision/minimap 定位。
+# ============================================================
+
+name: "亨耐希狩獵場 — 範例來回路線"
+map: "henesys_hunting_ground"
+
+points:
+  - label: "P1_左端"
+    x: 40
+    y: 120
+    commands:
+      - action: "buff"                       # 上 buff
+      - action: "attack"
+        args: { facing: "left", repeat: 3 }  # 面左攻擊 3 次
+      - action: "move"
+        args: { to: "P2_右端" }              # 移動到下一點
+
+  - label: "P2_右端"
+    x: 180
+    y: 120
+    commands:
+      - action: "attack"
+        args: { facing: "right", repeat: 3 }
+      - action: "move"
+        args: { to: "P1_左端" }              # 折返，形成循環
+
+# ---- 全域設定（選用）----
+options:
+  loop: true          # 走完最後一點後是否回到第一點
+  pick_up_items: true # 是否撿取掉落物（TODO：尚未實作）

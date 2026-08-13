@@ -1,0 +1,63 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ===== 虛擬環境 =====
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ===== 測試／型別／覆蓋率快取 =====
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# ===== IDE / 編輯器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ===== 作業系統 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 專案個人化 =====
+# 個人設定檔（保留 *.example.yaml 範例）
+config/settings.yaml
+
+# 執行期輸出
+logs/
+*.log
+debug/
+captures/
+
+# 個人截圖 / 模板素材：只保留資料夾結構，不上傳實際圖片
+assets/templates/*
+!assets/templates/.gitkeep

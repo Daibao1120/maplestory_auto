@@ -1,0 +1,16 @@
+# ===== 楓之谷經典版自動化腳本 相依套件 =====
+# 安裝： pip install -r requirements.txt
+
+# --- 核心 ---
+mss>=9.0.1              # 高速螢幕擷取（跨平台）
+opencv-python>=4.8.0   # 影像處理與模板匹配（cv2）
+numpy>=1.24.0          # 陣列運算（影像即 ndarray）
+pydirectinput>=1.0.4   # DirectInput 鍵鼠模擬；相容多數全螢幕遊戲（勿用 pyautogui）
+PyYAML>=6.0            # 讀取 YAML 設定檔與路線
+
+# --- 選用 ---
+# windows-capture>=1.0.0   # Windows Graphics Capture API，較 mss 更適合擷取單一視窗
+# pywin32>=306             # 以視窗標題定位遊戲視窗（Windows 專用）
+
+# --- 開發／測試 ---
+pytest>=7.4.0
