@@ -169,7 +169,10 @@ class HoldWiggle:
         self.dry_run = dry_run
         self._hwnd = None
         self._window_keyword = ""
-        self._was_fg = True                         # 上一圈楓之谷是否在前景（用來只在剛失焦時印一次）
+        self._was_fg = True                         # 上一圈楓之谷是否在前景（refocus 模式用）
+        self.focus_grace = 1.0                      # 焦點離開超過幾秒才算『你真的切走』（過濾短暫閃視窗）
+        self._fg_lost_at = None                     # 焦點何時離開楓之谷（None=在前景）
+        self._pause_announced = False               # 是否已印過『暫停』（避免每圈洗版）
         self._patrol_pos = 0                        # 目前離出發點幾步（正=右、負=左）
         self._patrol_dir = 1                        # 目前巡邏方向（+1 右 / -1 左）
         self._pending_face = None                   # 暫停期間記下你最後按的方向，恢復時採用
@@ -335,16 +338,28 @@ class HoldWiggle:
                                 continue
                             print("  ✓ 已切回楓之谷，繼續攻擊")
                         else:
-                            if self._was_fg:
-                                print("  ⏸ 你切到別的視窗（打字？）→ 暫停攻擊；"
-                                      "切回楓之谷會自動恢復")
+                            # 不搶焦點：完全不送鍵、讓開。焦點離開『超過 focus_grace 秒』
+                            # 才當成你真的切走並印訊息——短暫閃一下的視窗(bun/通知)直接忽略，
+                            # 因為分不出是誰搶的焦點，就用『有沒有離開夠久』來判斷。
+                            now = time.time()
+                            if self._fg_lost_at is None:
+                                self._fg_lost_at = now
+                            if (not self._pause_announced
+                                    and now - self._fg_lost_at >= self.focus_grace):
+                                print(f"  ⏸ 你切到別的視窗（打字？）超過 {self.focus_grace:.0f} 秒 "
+                                      "→ 暫停攻擊；切回楓之谷自動恢復")
+                                self._pause_announced = True
                             self._was_fg = False
-                            time.sleep(0.12)   # 讓開，完全不送鍵、不搶焦點
+                            time.sleep(0.12)
                             continue
                     else:
                         if not self._was_fg:   # 剛從別的視窗切回楓之谷
-                            print("  ▶ 回到楓之谷 → 自動恢復攻擊")
+                            if self._pause_announced:
+                                print("  ▶ 回到楓之谷 → 自動恢復攻擊")
+                            # 短暫閃一下就回來的：靜默恢復，不印任何東西
                         self._was_fg = True
+                        self._fg_lost_at = None
+                        self._pause_announced = False
 
                     now = time.time()
                     if self.enable_move and now - cycle_start >= wait:
