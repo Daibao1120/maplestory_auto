@@ -89,6 +89,7 @@ class FakeDet:
     cx: int
     cy: int
     score: float = 1.0
+    name: str = "speed_boost"
 
     @property
     def center(self):
@@ -96,17 +97,21 @@ class FakeDet:
 
 
 class RecordingController:
-    """記錄被呼叫的按鍵動作（取代 dry-run 印字，方便斷言）。"""
+    """記錄被呼叫的按鍵/滑鼠動作（取代 dry-run 印字，方便斷言）。"""
 
     def __init__(self):
         self.holds = []
         self.taps = []
+        self.right_clicks = []
 
     def hold(self, key, seconds):
         self.holds.append((key, seconds))
 
     def tap(self, key, duration=None):
         self.taps.append((key, duration))
+
+    def right_click(self, x, y, restore=True):
+        self.right_clicks.append((x, y))
 
     def key_down(self, key):
         pass
@@ -276,3 +281,87 @@ def test_engine_stall_watchdog_reacquires_lock():
     eng._tracker.reset = lambda: (resets.append(1), orig_reset())
     eng.start(max_loops=6)
     assert resets, "座標多圈未變應觸發重新定位"
+
+
+# ============================================================
+#  不想要的 buff（如速度激發）自動右鍵點掉
+# ============================================================
+
+class StubBuffDetector:
+    def __init__(self, dets):
+        self._dets = dets
+        self.template_names = ["speed_boost"]
+        self.roi = None
+
+    def detect(self, frame):
+        return self._dets
+
+
+def test_dispel_buff_right_clicks_detected_icon():
+    eng = make_engine()
+    eng.buff_detector = StubBuffDetector([FakeDet(2500, 60)])
+    eng._buff_roi_given = True        # 跳過用 frame 推算 ROI（stub 不需要）
+    eng._next_buff_check = 0.0
+    eng._dispel_buffs(object())       # frame 只要非 None 即可
+    assert eng.controller.right_clicks == [(2500, 60)]
+    # 間隔內不重複點
+    eng._dispel_buffs(object())
+    assert len(eng.controller.right_clicks) == 1
+
+
+def test_dispel_buff_silent_without_templates():
+    eng = make_engine()               # 真 detector、資料夾沒有模板
+    eng._next_buff_check = 0.0
+    eng._dispel_buffs(object())
+    assert eng.controller.right_clicks == []
+
+
+# ============================================================
+#  畫面邊緣探測（第二道防線：小地圖解析度太低）
+# ============================================================
+
+def _probe_frame():
+    import pytest
+    np = pytest.importorskip("numpy")
+    # 200x300 均勻灰底：角色錨點取畫面中心 (150,100)，腳下取樣 y=140
+    frame = np.full((200, 300, 3), 120, dtype=np.uint8)
+    return np, frame
+
+
+def test_edge_probe_same_ground_is_safe():
+    from src.vision.edge_probe import probe_ahead_safe
+    _np, frame = _probe_frame()
+    assert probe_ahead_safe(frame, (150, 100), "left") is True
+    assert probe_ahead_safe(frame, (150, 100), "right") is True
+
+
+def test_edge_probe_detects_water_ahead():
+    from src.vision.edge_probe import probe_ahead_safe
+    np, frame = _probe_frame()
+    frame[120:160, 210:280] = np.array([255, 255, 255], dtype=np.uint8)  # 右前方變色（水面）
+    assert probe_ahead_safe(frame, (150, 100), "right") is False
+    assert probe_ahead_safe(frame, (150, 100), "left") is True
+
+
+def test_edge_probe_unsafe_when_ahead_off_screen():
+    from src.vision.edge_probe import probe_ahead_safe
+    _np, frame = _probe_frame()
+    # 角色貼近畫面右緣 → 前方取樣超出畫面 → 不安全
+    assert probe_ahead_safe(frame, (290, 100), "right") is False
+
+
+def test_edge_probe_no_veto_without_frame():
+    from src.vision.edge_probe import probe_ahead_safe
+    assert probe_ahead_safe(None, (0, 0), "right") is True
+
+
+def test_patrol_visual_veto_turns_back():
+    import pytest
+    np = pytest.importorskip("numpy")
+    eng = make_engine(with_platforms=False)
+    frame = np.full((200, 300, 3), 120, dtype=np.uint8)
+    frame[120:160, 210:280] = np.array([255, 255, 255], dtype=np.uint8)  # 右前方是水
+    eng._last_frame = frame           # 角色錨點 = 畫面中心 (150,100)
+    eng._patrol_dir = "right"
+    eng._patrol((38, 38))             # 小地圖仍在邊界內，但畫面說右邊不是地面
+    assert [k for k, _ in eng.controller.holds] == ["left"]

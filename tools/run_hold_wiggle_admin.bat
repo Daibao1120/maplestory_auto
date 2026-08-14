@@ -74,7 +74,13 @@ REM                           or send any keys into your window. Click back on
 REM                           MapleStory and it auto-resumes. REMOVE this flag if
 REM                           you instead want it to grab focus back on popups.
 REM   --no-move               add this to NOT move at all, just keep attacking
-%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --edge-guard --edge-margin 6 --face left --interval-min 40 --interval-max 55 --no-refocus
+REM   --dispel-buff           watch the top-right buff bar and RIGHT-CLICK away
+REM                           unwanted buffs (e.g. speed boosts that make every
+REM                           step overshoot and walk off the platform). Put a
+REM                           screenshot of each unwanted buff icon into
+REM                           assets\templates\buffs\ first; without templates
+REM                           it just prints a hint and stays off.
+%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --edge-guard --edge-margin 6 --dispel-buff --face left --interval-min 40 --interval-max 55 --no-refocus
 
 echo.
 echo Finished. Press any key to close.

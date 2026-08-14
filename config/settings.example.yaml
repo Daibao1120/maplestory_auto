@@ -71,6 +71,29 @@ vision:
     mp_color_lower: [95, 120, 120]   # MP 條藍
     mp_color_upper: [135, 255, 255]
 
+  # ---- 邊緣探測（防掉落第二道防線）----
+  # 小地圖 1px ≈ 數十畫面 px，貼近邊緣時太粗。這裡直接看畫面：比較「角色腳下」
+  # 與「前方同高度」取樣區的平均色，色差過大 = 前方不是同一種地面（水面/懸空）
+  # → 不再往那個方向走。以腳下當基準，免逐地圖校準顏色。
+  # ★ 下列 px 值以參考視窗 1371 寬校準；視窗更大請等比放大（例如 2732 寬 ×2）。
+  edge_probe:
+    enabled: true
+    ahead_px: 90         # 探測點在角色前方多遠（畫面 px）
+    foot_offset_y: 40    # 腳底取樣中心在角色錨點下方多遠（畫面 px）
+    patch: [40, 16]      # 取樣區大小 [寬, 高]
+    max_color_diff: 60   # 前方 vs 腳下平均色差門檻（BGR 距離 0~441；誤判邊界請調大）
+
+  # ---- 不想要的 buff 自動右鍵點掉 ----
+  # 例：別人丟的「速度激發」——移速變快後校準好的步伐全會走過頭，一動就掉出
+  # 平台。把「要點掉的 buff 圖示」截圖放進 template_dir（見該資料夾 README），
+  # 偵測到就到右上角 buff 列按滑鼠右鍵移除（點完游標會移回原位）。
+  buff_dispel:
+    enabled: true
+    template_dir: "assets/templates/buffs"
+    roi: null            # buff 列區域 [left, top, width, height]；null = 右上角自動推算
+    match_threshold: 0.80
+    check_interval: 5.0  # 幾秒檢查一次
+
   monster:
     # 怪物模板資料夾：放你自己的「鱷魚」截圖（可多張不同動作/方向以提高命中率）
     template_dir: "assets/templates/monsters"

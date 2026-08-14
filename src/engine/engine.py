@@ -17,7 +17,7 @@ from typing import List, Optional
 
 from src.capture import ScreenCapture
 from src.vision import (TemplateMatcher, MinimapLocator, PlayerTracker,
-                        HealthBarDetector, MonsterDetector)
+                        HealthBarDetector, MonsterDetector, probe_ahead_safe)
 from src.input import InputController
 from src.routine import Routine, load_routine
 from src.commands import (CommandBook, CommandContext, PlatformState,
@@ -92,6 +92,18 @@ class BotEngine:
         self._repo_swap = True
         self._next_reposition_ts = 0.0
         self._repo_alt = True  # 讀不到位置時左右極小交替用
+        # 防掉落第二道防線：以畫面上角色前方的地面顏色判斷是否還在平台上
+        #（小地圖解析度太低，貼邊時不夠精細）
+        self._last_frame = None
+        self._edge_probe_cfg = {}
+        self._edge_probe_enabled = True
+        # 不想要的 buff（如別人丟的「速度激發」——移速變快步伐全會走過頭）
+        # → 偵測到就右鍵點掉
+        self.buff_detector: Optional[MonsterDetector] = None
+        self._buff_enabled = True
+        self._buff_interval = 5.0
+        self._buff_roi_given = False
+        self._next_buff_check = 0.0
 
     # ---- 初始化 ----
     def setup(self):
@@ -141,6 +153,22 @@ class BotEngine:
         # 按住須明顯超過 0.1 秒才會真的走路（≲0.1 只轉身），太小等於沒動
         self._repo_step = float(combat.get("reposition_step_seconds", 0.2))
         self._repo_swap = bool(combat.get("reposition_swap_facing", True))
+        # 邊緣探測（畫面防線）與 buff 自動點掉
+        ep = vision_cfg.get("edge_probe") or {}
+        self._edge_probe_enabled = bool(ep.get("enabled", True))
+        self._edge_probe_cfg = ep
+        bd = vision_cfg.get("buff_dispel") or {}
+        self._buff_enabled = bool(bd.get("enabled", True))
+        self._buff_interval = float(bd.get("check_interval", 5.0))
+        self._buff_roi_given = bd.get("roi") is not None
+        # MonsterDetector 是通用的多模板偵測器，直接拿來找 buff 圖示
+        self.buff_detector = MonsterDetector({
+            "template_dir": bd.get("template_dir", "assets/templates/buffs"),
+            "match_threshold": bd.get("match_threshold", 0.80),
+            "roi": bd.get("roi"),
+            "nms_iou": 0.3,
+        })
+        self.buff_detector.load_templates()  # 資料夾不存在／缺 cv2 → 保持空
         self._platforms = list(combat.get("platforms") or [])
         self._switch_cfg = combat.get("platform_switch") or {}
         self._attack_y_band = combat.get("attack_y_band")
@@ -223,6 +251,7 @@ class BotEngine:
                 elif player_mm is not None:
                     self._stall_loops = 0
                 self._moved_last_loop = False
+                self._last_frame = frame
                 hp = self.health.read_hp_ratio(frame)
                 mp = self.health.read_mp_ratio(frame)
                 monsters = self.monster.detect(frame)
@@ -243,6 +272,7 @@ class BotEngine:
                 # 決策 / 行動
                 self._maintain_survival(frame, hp, mp)
                 self._handle_rune(frame)
+                self._dispel_buffs(frame)
                 self._combat_blocked = False
                 acted = self._combat(player_screen, attackable, player_mm)
                 if self._platforms:
@@ -328,6 +358,39 @@ class BotEngine:
         if self.rune_detector.detect(frame):
             self.rune_solver.solve(frame, self.controller)
 
+    def _dispel_buffs(self, frame):
+        """偵測「不想要的 buff」圖示並右鍵點掉。
+
+        例：別人丟的「速度激發」——移速變快後，校準好的步伐全部走過頭，
+        一動就掉出平台，必須在右上角 buff 列用滑鼠右鍵移除。
+        要點掉哪些 buff 由使用者把圖示截圖放進 template_dir 決定。
+        """
+        if not self._buff_enabled or self.buff_detector is None or frame is None:
+            return
+        if not self.buff_detector.template_names:
+            return  # 沒放任何 buff 圖示模板 → 功能靜默停用
+        now = time.time()
+        if now < self._next_buff_check:
+            return
+        self._next_buff_check = now + self._buff_interval
+        if not self._buff_roi_given and hasattr(frame, "shape"):
+            # 未指定 ROI → 用畫面尺寸推算右上角 buff 列區域（右 45%、上 25%）
+            h, w = frame.shape[:2]
+            self.buff_detector.roi = [int(w * 0.55), 0, w - int(w * 0.55), int(h * 0.25)]
+            self._buff_roi_given = True
+        dets = self.buff_detector.detect(frame)
+        if not dets:
+            return
+        x, y = dets[0].center
+        off_l = off_t = 0
+        if not self.dry_run:
+            region = self.capture.locate_window()  # frame 是視窗相對座標 → 換算螢幕座標
+            if region is not None:
+                off_l, off_t = region.left, region.top
+        if self.dry_run:
+            print(f"        ↳ 偵測到要點掉的 buff「{dets[0].name}」({x},{y}) → 右鍵移除")
+        self.controller.right_click(off_l + x, off_t + y)
+
     def _combat(self, player_screen, monsters, player_mm=None):
         """打怪：弓箭手遠程定點。有怪回傳 True（已處理），無怪回傳 False。
 
@@ -404,6 +467,17 @@ class BotEngine:
             if self.dry_run:
                 print("        ↳ 無怪 → 小地圖讀不到玩家，原地等待（不盲走以免掉出平台）")
             return
+        # 第二道防線：畫面上角色前方若不是同一種地面（水面/懸空）就先折返；
+        # 兩邊都不安全就原地等待。小地圖解析度低，貼邊時以畫面為準。
+        if not self._ahead_is_safe(d):
+            opp = "left" if d == "right" else "right"
+            if not self._ahead_is_safe(opp):
+                if self.dry_run:
+                    print("        ↳ 無怪 → 畫面偵測兩側地面都可疑，原地等待")
+                return
+            d, at_edge = opp, True
+            if self.dry_run:
+                print(f"        ↳ 畫面偵測前方不是平台地面 → 改往{d}")
         self._patrol_dir = d
         if self.dry_run:
             edge = "（近邊界，折返）" if at_edge else ""
@@ -426,6 +500,13 @@ class BotEngine:
         else:
             d = "right" if self._repo_alt else "left"
             self._repo_alt = not self._repo_alt
+        if not self._ahead_is_safe(d):
+            opp = "left" if d == "right" else "right"
+            if not self._ahead_is_safe(opp):
+                if self.dry_run:
+                    print("        ↳ 防攻擊失效：兩側地面都可疑 → 這次不挪步")
+                return
+            d = opp
         if self.dry_run:
             print(f"        ↳ 防攻擊失效：小步移動往{d}（{self._repo_step:.2f}s，"
                   "定點久站攻擊會失效）")
@@ -435,6 +516,18 @@ class BotEngine:
         self._moved_last_loop = True
 
     # ---- 防掉落輔助 ----
+    def _ahead_is_safe(self, direction):
+        """第二道防線：畫面上角色前方是否還是「與腳下同種」的地面。
+
+        小地圖 1px ≈ 數十畫面 px、貼邊時太粗；這裡直接比對腳下與前方
+        取樣區的平均色。讀不到畫面／缺 numpy 時不否決（回傳 True）。
+        """
+        if not self._edge_probe_enabled or self._last_frame is None:
+            return True
+        anchor = self._player_screen(self._last_frame)
+        return probe_ahead_safe(self._last_frame, anchor, direction,
+                                self._edge_probe_cfg)
+
     def _bounds_at(self, player_mm):
         """回傳目前位置適用的巡邏邊界 (left, right)（小地圖 x）。
 
@@ -460,6 +553,8 @@ class BotEngine:
         """
         if player_mm is None:
             return False  # 讀不到自己的位置就不盲走
+        if not self._ahead_is_safe(direction):
+            return False  # 畫面偵測前方不是平台地面（第二道防線）
         bounds = self._bounds_at(player_mm)
         if bounds is None:
             return False
@@ -483,6 +578,12 @@ class BotEngine:
         if self.dry_run:
             verb = "邊走邊跳上" if kind == "jump_move" else "走向"
             print(f"        ↳ 換平台：{verb}「{name}」(往{d}，第{st.move_loops}圈)")
+        if kind != "jump_move" and not self._ahead_is_safe(d):
+            # 走路換平台但畫面偵測前方可疑 → 這一圈不走（move_loops 會累積，
+            # 卡太久 plan_two_platforms 自己會放棄改守另一平台）
+            if self.dry_run:
+                print(f"        ↳ 換平台：畫面偵測往{d}的前方不是地面 → 暫停一步")
+            return
         ctx = self._make_ctx(None)
         if kind == "jump_move":
             self.command_book.create("jump_move", {"dir": d}).execute(ctx)

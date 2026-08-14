@@ -104,3 +104,33 @@ class InputController:
         else:
             pydirectinput.click()
         self._sleep_action()
+
+    def right_click(self, x, y, restore=True):
+        """在螢幕座標 (x, y) 按滑鼠右鍵（點掉不想要的 buff 用）。
+
+        restore=True 時點完把游標移回原位，避免游標停在 buff 列上擋畫面。
+        """
+        self._require_backend()
+        if self.dry_run:
+            print(f"[dry_run] rightClick ({x}, {y})")
+            return
+        old = None
+        if restore:
+            try:
+                import ctypes
+                import ctypes.wintypes as wt
+                pt = wt.POINT()
+                if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                    old = (pt.x, pt.y)
+            except Exception:
+                old = None
+        try:
+            pydirectinput.rightClick(int(x), int(y))
+        except AttributeError:  # 舊版 pydirectinput 沒有 rightClick
+            pydirectinput.click(int(x), int(y), button="right")
+        if old is not None:
+            try:
+                pydirectinput.moveTo(old[0], old[1])
+            except Exception:
+                pass
+        self._sleep_action()

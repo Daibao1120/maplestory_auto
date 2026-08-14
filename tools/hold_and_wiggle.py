@@ -72,6 +72,8 @@ class _Input(ctypes.Structure):
 _KEYEVENTF_SCANCODE = 0x0008
 _KEYEVENTF_KEYUP = 0x0002
 _KEYEVENTF_EXTENDEDKEY = 0x0001
+_MOUSEEVENTF_RIGHTDOWN = 0x0008
+_MOUSEEVENTF_RIGHTUP = 0x0010
 
 # 名稱 → (scancode, 是否為擴充鍵)。方向鍵必須是擴充鍵，否則遊戲可能收不到。
 _SCAN = {
@@ -111,6 +113,23 @@ def _send_key(name: str, keyup: bool) -> None:
 def _pressed(vk: int) -> bool:
     """使用者當下是否按著這個鍵（最高位元 = 現在被按住）。"""
     return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+def _right_click_at(sx: int, sy: int) -> None:
+    """在螢幕座標 (sx, sy) 按一下滑鼠右鍵，點完把游標移回原位。"""
+    pt = wt.POINT()
+    had_old = bool(_user32.GetCursorPos(ctypes.byref(pt)))
+    _user32.SetCursorPos(int(sx), int(sy))
+    time.sleep(0.04)
+    for flags in (_MOUSEEVENTF_RIGHTDOWN, _MOUSEEVENTF_RIGHTUP):
+        extra = ctypes.c_ulong(0)
+        ii = _InputI()
+        ii.mi = _MouseInput(0, 0, 0, flags, 0, ctypes.pointer(extra))
+        cmd = _Input(0, ii)  # INPUT_MOUSE = 0
+        _user32.SendInput(1, ctypes.pointer(cmd), ctypes.sizeof(cmd))
+        time.sleep(0.03)
+    if had_old:
+        _user32.SetCursorPos(pt.x, pt.y)
 
 
 # ============================================================
@@ -162,7 +181,8 @@ class HoldWiggle:
                  move_time=0.18, attack_interval=0.22, patrol_steps=2,
                  attack_facing="left", enable_move=True, refocus=True,
                  jump_in_place=False, jump_key="alt",
-                 edge_guard=False, edge_margin=6, dry_run=False):
+                 edge_guard=False, edge_margin=6,
+                 dispel_buff=False, dispel_interval=5.0, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
@@ -175,6 +195,11 @@ class HoldWiggle:
         self.jump_key = jump_key                    # 跳躍鍵
         self.edge_guard = edge_guard                # True = 用小地圖真實 x 巡邏、到邊界折返（不會走出平台）
         self.edge_margin = int(edge_margin)         # 安全界：起始 x ± 這麼多小地圖 px
+        self.dispel_buff = dispel_buff              # True = 偵測「要點掉的 buff」（如速度激發）並右鍵移除
+        self.dispel_interval = float(dispel_interval)
+        self._tm = None                             # TemplateMatcher（延遲建立）
+        self._dispel_roi = None                     # buff 列 ROI；None = 右上角自動推算
+        self._dispel_last = 0.0
         self._cap = None                            # ScreenCapture（延遲建立）
         self._mmloc = None                          # MinimapLocator
         self._edge_lo = None
@@ -227,20 +252,84 @@ class HoldWiggle:
         self._tap(self.attack_facing, hold=0.03)
 
     # ---- edge-guard：用小地圖真實 x 判斷邊界 ----
+    @staticmethod
+    def _load_settings():
+        """讀 config/settings.yaml（沒有就用 example）。"""
+        import yaml
+        cfgpath = os.path.join(ROOT, "config", "settings.yaml")
+        if not os.path.exists(cfgpath):
+            cfgpath = os.path.join(ROOT, "config", "settings.example.yaml")
+        with open(cfgpath, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+
     def _init_edge_guard(self):
         """延遲載入辨識模組、建立擷取器與小地圖定位器。缺套件會丟例外，由呼叫端接。"""
         if ROOT not in sys.path:
             sys.path.insert(0, ROOT)
         from src.capture import ScreenCapture   # 需要 mss
         from src.vision import MinimapLocator    # 需要 opencv/numpy
-        import yaml
-        cfgpath = os.path.join(ROOT, "config", "settings.yaml")
-        if not os.path.exists(cfgpath):
-            cfgpath = os.path.join(ROOT, "config", "settings.example.yaml")
-        with open(cfgpath, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
-        self._cap = ScreenCapture(backend="mss", window_title=self._window_keyword)
+        cfg = self._load_settings()
+        if self._cap is None:
+            self._cap = ScreenCapture(backend="mss", window_title=self._window_keyword)
         self._mmloc = MinimapLocator(cfg["vision"]["minimap"])
+
+    # ---- dispel-buff：偵測「要點掉的 buff」（如速度激發）並右鍵移除 ----
+    def _init_dispel(self):
+        """建立模板匹配器並載入 buff 圖示。沒有模板／缺套件 → 停用並提示。"""
+        if ROOT not in sys.path:
+            sys.path.insert(0, ROOT)
+        from src.capture import ScreenCapture     # 需要 mss
+        from src.vision import TemplateMatcher    # 需要 opencv/numpy
+        cfg = self._load_settings()
+        bd = (cfg.get("vision", {}) or {}).get("buff_dispel", {}) or {}
+        self._dispel_roi = bd.get("roi")
+        tmdir = os.path.join(ROOT, bd.get("template_dir", "assets/templates/buffs"))
+        self._tm = TemplateMatcher(threshold=float(bd.get("match_threshold", 0.80)))
+        try:
+            self._tm.load_directory(tmdir)
+        except FileNotFoundError:
+            pass
+        if not self._tm.template_names:
+            print(f"[提示] --dispel-buff：{tmdir} 沒有 buff 圖示截圖 → 停用。"
+                  "（把「速度激發」等要點掉的 buff 圖示截圖放進去即可啟用）")
+            self.dispel_buff = False
+            return
+        if self._cap is None:
+            self._cap = ScreenCapture(backend="mss", window_title=self._window_keyword)
+        print(f"  ✓ dispel-buff 啟用：監看 {len(self._tm.template_names)} 個 buff 圖示，"
+              f"每 {self.dispel_interval:.0f} 秒檢查一次，偵測到就右鍵點掉")
+
+    def _dispel_check(self):
+        """右上角出現要點掉的 buff（如速度激發）→ 右鍵移除。
+
+        速度激發會讓移速變快，校準好的步伐全部走過頭，一動就掉出平台。
+        任何例外都吞掉（絕不讓掛機主迴圈因此中斷）。
+        """
+        try:
+            frame = self._cap.grab()
+            if frame is None:
+                return
+            h, w = frame.shape[:2]
+            roi = self._dispel_roi or [int(w * 0.55), 0, w - int(w * 0.55), int(h * 0.25)]
+            l, t, rw, rh = (int(v) for v in roi)
+            region = frame[t:t + rh, l:l + rw]
+            if region.size == 0:
+                return
+            best = None
+            for name in self._tm.template_names:
+                for m in self._tm.match(region, name):
+                    if best is None or m.score > best.score:
+                        best = m
+            if best is None:
+                return
+            # frame 是視窗相對座標 → 加上視窗左上角換算成螢幕座標
+            win = self._cap.locate_window()
+            ox, oy = (win.left, win.top) if win is not None else (0, 0)
+            cx, cy = best.center
+            print(f"  ✂ 偵測到要點掉的 buff「{best.name}」→ 右鍵移除")
+            _right_click_at(ox + l + cx, oy + t + cy)
+        except Exception:
+            pass
 
     def _player_x(self, retries=5, gap=0.12, fresh=False):
         """讀玩家在小地圖上的 x（只讀畫面，不送鍵、不搶焦點）。抓不到回 None。
@@ -411,6 +500,14 @@ class HoldWiggle:
                     self._edge_hi = sx + self.edge_margin
                     print(f"  ✓ edge-guard 啟用：中心 x={sx}（移動一律往這裡回歸，貼著中心不往外走）")
 
+        # dispel-buff：右上角出現「要點掉的 buff」（如速度激發）→ 右鍵移除
+        if self.dispel_buff and not self.dry_run:
+            try:
+                self._init_dispel()
+            except Exception as e:
+                print(f"[警告] dispel-buff 初始化失敗（缺 opencv/mss？{e}）→ 停用")
+                self.dispel_buff = False
+
         if self.edge_guard:
             move_desc = (f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏，"
                          f"用小地圖真實 x 到邊界折返（不會走出平台）")
@@ -491,6 +588,11 @@ class HoldWiggle:
                         self._fg_lost_at = None
                         self._pause_announced = False
 
+                    # buff 檢查（速度激發等會讓步伐走過頭 → 掉出平台，要馬上點掉）
+                    if self.dispel_buff and time.time() - self._dispel_last >= self.dispel_interval:
+                        self._dispel_check()
+                        self._dispel_last = time.time()
+
                     now = time.time()
                     if self.enable_move and now - cycle_start >= wait:
                         self._move()
@@ -568,6 +670,11 @@ def parse_args(argv=None):
                    help="用小地圖真實 x 巡邏、到安全界折返（不會走出平台）；需 opencv/mss")
     p.add_argument("--edge-margin", type=int, default=6,
                    help="edge-guard 安全界：起始 x ± 這麼多小地圖 px（預設 6，平台窄設更小）")
+    p.add_argument("--dispel-buff", action="store_true",
+                   help="偵測右上角「要點掉的 buff」（如速度激發：移速變快步伐會走過頭而"
+                        "掉出平台）並自動右鍵移除；圖示截圖放 assets/templates/buffs/，需 opencv/mss")
+    p.add_argument("--dispel-interval", type=float, default=5.0,
+                   help="dispel-buff 檢查間隔秒數（預設 5）")
     p.add_argument("--jump-in-place", action="store_true",
                    help="改用『原地跳』重定位（直上直下不位移，小平台不會掉下去）")
     p.add_argument("--jump-key", default="alt", choices=sorted(_SCAN),
@@ -595,7 +702,8 @@ def main(argv=None):
                     attack_facing=args.face, enable_move=not args.no_move,
                     refocus=not args.no_refocus, jump_in_place=args.jump_in_place,
                     jump_key=args.jump_key, edge_guard=args.edge_guard,
-                    edge_margin=args.edge_margin, dry_run=args.dry_run)
+                    edge_margin=args.edge_margin, dispel_buff=args.dispel_buff,
+                    dispel_interval=args.dispel_interval, dry_run=args.dry_run)
     return hw.run(args.window)
 
 

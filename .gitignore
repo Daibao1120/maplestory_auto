@@ -65,6 +65,10 @@ assets/templates/*
 assets/templates/monsters/*
 !assets/templates/monsters/.gitkeep
 !assets/templates/monsters/README.md
+!assets/templates/buffs/
+assets/templates/buffs/*
+!assets/templates/buffs/.gitkeep
+!assets/templates/buffs/README.md
 
 # 校準用遊戲截圖（同上，不進版控）
 tests/data/
