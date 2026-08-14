@@ -156,7 +156,8 @@ class HoldWiggle:
 
     def __init__(self, attack_key="ctrl", interval_min=40.0, interval_max=55.0,
                  move_time=0.18, attack_interval=0.22, patrol_steps=2,
-                 attack_facing="left", enable_move=True, refocus=True, dry_run=False):
+                 attack_facing="left", enable_move=True, refocus=True,
+                 jump_in_place=False, jump_key="alt", dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
@@ -165,6 +166,8 @@ class HoldWiggle:
         self.patrol_steps = max(1, int(patrol_steps))  # 從中心往單邊最多走幾步就折返
         self.attack_facing = attack_facing          # 固定攻擊方向（left/right）；移動後轉回這邊
         self.enable_move = enable_move              # False = 完全不移動，只連點攻擊
+        self.jump_in_place = jump_in_place          # True = 改用原地跳重定位（小平台不會掉下去）
+        self.jump_key = jump_key                    # 跳躍鍵
         self.refocus = refocus                      # 焦點被搶走時自動切回楓之谷
         self.dry_run = dry_run
         self._hwnd = None
@@ -255,6 +258,12 @@ class HoldWiggle:
         （解決平台很小）。走完直接 return，主迴圈下一圈立刻接回連點攻擊。
         """
         if not self.enable_move:
+            return
+        if self.jump_in_place:
+            # 原地跳：直上直下、水平不位移 → 平台再小也掉不出去（前提是跳也算移動）
+            self._tap(self.jump_key, hold=random.uniform(0.04, 0.08))
+            print("  ↻ 原地跳一下（不位移、掉不出平台）→ 接回攻擊")
+            time.sleep(random.uniform(0.1, 0.2))
             return
         direction = "right" if self._patrol_dir > 0 else "left"
         t = self.move_time
@@ -420,6 +429,10 @@ def parse_args(argv=None):
     p.add_argument("--face", choices=("left", "right"), default="left",
                    help="起始攻擊方向的『假設值』（預設 left）；開場不會強制轉向、沿用你角色"
                         "當下面向，之後手動換邊（暫停→轉向→Ctrl）會自動更新")
+    p.add_argument("--jump-in-place", action="store_true",
+                   help="改用『原地跳』重定位（直上直下不位移，小平台不會掉下去）")
+    p.add_argument("--jump-key", default="alt", choices=sorted(_SCAN),
+                   help="跳躍鍵（預設 alt）")
     p.add_argument("--no-move", action="store_true",
                    help="完全不移動，只連點攻擊（只想定點刷攻擊時用）")
     p.add_argument("--no-refocus", action="store_true",
@@ -441,7 +454,8 @@ def main(argv=None):
                     interval_max=args.interval_max, move_time=args.move_time,
                     attack_interval=args.attack_interval, patrol_steps=args.patrol_steps,
                     attack_facing=args.face, enable_move=not args.no_move,
-                    refocus=not args.no_refocus, dry_run=args.dry_run)
+                    refocus=not args.no_refocus, jump_in_place=args.jump_in_place,
+                    jump_key=args.jump_key, dry_run=args.dry_run)
     return hw.run(args.window)
 
 
