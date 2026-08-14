@@ -183,7 +183,8 @@ class HoldWiggle:
                  jump_in_place=False, jump_key="alt",
                  edge_guard=False, edge_margin=6,
                  dispel_buff=False, dispel_interval=5.0,
-                 alternate_face=True, swap_every=1, dry_run=False):
+                 alternate_face=True, swap_every=1,
+                 smart_face=True, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
@@ -203,6 +204,13 @@ class HoldWiggle:
         self.alternate_face = alternate_face        # True = 每 swap_every 次挪步換一次攻擊方向
         self.swap_every = max(1, int(swap_every))
         self._cycle_count = 0
+        # 擬人化：看哪邊「動靜多」（怪會走動/有動畫）就朝哪邊打，而不是機械輪流。
+        # 不需要怪物模板——比較角色左右兩側的畫格差異量即可；判斷不了時退回輪流換邊。
+        self.smart_face = smart_face and not dry_run
+        self._smart_ready = False
+        self._np = None                             # numpy（延遲載入）
+        self._smart_next = 0.0                      # 下次動靜檢查的時間
+        self._next_attack = 0.0                     # 下次攻擊時間（帶隨機抖動）
         self._tm = None                             # TemplateMatcher（延遲建立）
         self._dispel_roi = None                     # buff 列 ROI；None = 右上角自動推算
         self._dispel_last = 0.0
@@ -260,13 +268,81 @@ class HoldWiggle:
     def _next_face(self):
         """這一次挪步後要朝哪一邊打。
 
-        防攻擊失效不能只靠位移：實測有效的人工節奏是「移動一下＋換邊打」，
-        所以每 swap_every 次挪步就真的換邊，並持續朝那一邊打到下一次挪步。
+        優先看「哪邊怪多」（動靜偵測）；判斷不了才用輪流換邊——防攻擊失效
+        不能只靠位移，實測有效的人工節奏是「移動一下＋換邊打」。
         """
         self._cycle_count += 1
         if self.alternate_face and self._cycle_count % self.swap_every == 0:
-            return "left" if self.attack_facing == "right" else "right"
-        return self.attack_facing
+            fallback = "left" if self.attack_facing == "right" else "right"
+        else:
+            fallback = self.attack_facing
+        face, counts = self._pick_face_by_motion(fallback)
+        if counts is not None and face != fallback:
+            pass  # 動靜壓過輪流：訊息由呼叫端印
+        return face
+
+    # ---- 擬人化：動靜偵測（哪邊怪多打哪邊，不需怪物模板）----
+    def _init_smart(self):
+        """延遲初始化動靜偵測：需要 mss 擷取＋numpy。失敗 → 退回輪流換邊。"""
+        if self._smart_ready:
+            return True
+        try:
+            if ROOT not in sys.path:
+                sys.path.insert(0, ROOT)
+            import numpy as np
+            from src.capture import ScreenCapture
+            self._np = np
+            if self._cap is None:
+                self._cap = ScreenCapture(backend="mss", window_title=self._window_keyword)
+            self._smart_ready = True
+            return True
+        except Exception as e:
+            print(f"[提示] 動靜偵測初始化失敗（缺 numpy/mss？{e}）→ 改用輪流換邊")
+            self.smart_face = False
+            return False
+
+    def _motion_sides(self):
+        """量角色左右兩側的畫面動靜量（怪走動/動畫產生的畫格差異像素數）。
+
+        排除：畫面上下緣的 UI 帶、中央一條（自己角色與技能動畫的動靜）。
+        """
+        np = self._np
+        f1 = self._cap.grab()
+        time.sleep(0.15)
+        f2 = self._cap.grab()
+        if f1 is None or f2 is None or f1.shape != f2.shape:
+            return None
+        h, w = f1.shape[:2]
+        y0, y1 = int(h * 0.20), int(h * 0.85)          # 去掉上下 UI
+        cx, dead = w // 2, int(w * 0.08)               # 中央排除帶（自己）
+        diff = np.abs(f1[y0:y1].astype(np.int16) - f2[y0:y1].astype(np.int16)).max(axis=2)
+        moving = diff > 20
+        left = int(moving[:, :cx - dead].sum())
+        right = int(moving[:, cx + dead:].sum())
+        return left, right
+
+    def _pick_face_by_motion(self, fallback):
+        """回傳 (要面向的邊, (左動靜, 右動靜) 或 None)。
+
+        單邊動靜明顯較多（>1.25 倍）才換過去；兩邊差不多或都沒動靜
+        （怪被清光）→ 用 fallback（輪流換邊，兼顧防失效）。
+        """
+        if not self.smart_face or not self._init_smart():
+            return fallback, None
+        try:
+            sides = self._motion_sides()
+        except Exception:
+            return fallback, None
+        if sides is None:
+            return fallback, None
+        left, right = sides
+        if left + right < 400:                         # 兩邊都靜悄悄：沒怪
+            return fallback, sides
+        if left > right * 1.25:
+            return "left", sides
+        if right > left * 1.25:
+            return "right", sides
+        return fallback, sides
 
     def _set_face_after_step(self, facing_now, target_face):
         """挪步結束後把面向定到 target_face；回傳給訊息用的後綴字串。
@@ -538,6 +614,8 @@ class HoldWiggle:
         swap_desc = ("挪步後換邊打" if self.alternate_face and self.swap_every == 1 else
                      f"每 {self.swap_every} 次挪步換邊打" if self.alternate_face else
                      "固定單邊打")
+        if self.smart_face:
+            swap_desc = f"哪邊怪多打哪邊（動靜偵測，每 8~14 秒看一眼；判斷不了才{swap_desc}）"
         if self.edge_guard:
             move_desc = (f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏，"
                          f"用小地圖真實 x 到邊界折返（不會走出平台），{swap_desc}")
@@ -554,7 +632,7 @@ class HoldWiggle:
         state = "RUNNING"
         cycle_start = time.time()
         wait = self._next_interval()
-        last_attack = 0.0
+        self._next_attack = 0.0
         # 開場不強制轉向——沿用你啟動時角色本來面對的方向。attack_facing 只是假設值，
         # 你手動換邊（暫停→轉向→Ctrl 恢復）後會自動更新成你最後面對的方向。
         _f = '左' if self.attack_facing == 'left' else '右'
@@ -623,16 +701,32 @@ class HoldWiggle:
                         self._dispel_check()
                         self._dispel_last = time.time()
 
+                    # 擬人化：每隔 8~14 秒看一眼哪邊動靜多（= 怪在哪邊），怪明顯
+                    # 移到另一邊就跟著轉過去打——像人在顧螢幕，不是機械輪流。
+                    if self.smart_face and time.time() >= self._smart_next:
+                        face, sides = self._pick_face_by_motion(self.attack_facing)
+                        if sides is not None and face != self.attack_facing:
+                            self._reface(face)
+                            self.attack_facing = face
+                            l, r = sides
+                            print(f"  ⇄ {'左' if face == 'left' else '右'}邊動靜較多"
+                                  f"（左{l}/右{r}）→ 換邊打")
+                        self._smart_next = time.time() + random.uniform(8.0, 14.0)
+
                     now = time.time()
                     if self.enable_move and now - cycle_start >= wait:
                         self._move()
                         cycle_start = time.time()
                         wait = self._next_interval()
-                        last_attack = 0.0  # 移動後立刻接回攻擊（下一圈馬上點）
+                        self._next_attack = 0.0  # 移動後立刻接回攻擊（下一圈馬上點）
                         print(f"  （下次移動：{wait:.0f} 秒後）")
-                    elif now - last_attack >= self.attack_interval:
+                    elif now >= self._next_attack:
                         self._attack_once()
-                        last_attack = time.time()
+                        # 攻擊間隔帶抖動、偶爾停頓一下——人不會用碼表點鍵
+                        gap = self.attack_interval * random.uniform(0.85, 1.30)
+                        if random.random() < 0.02:
+                            gap += random.uniform(0.6, 1.6)
+                        self._next_attack = time.time() + gap
 
                 elif state == "PAUSED":
                     d = self._user_direction()      # 暫停期間持續記住你面對的方向
@@ -656,7 +750,7 @@ class HoldWiggle:
                         state = "RUNNING"
                         cycle_start = time.time()
                         wait = self._next_interval()
-                        last_attack = 0.0
+                        self._next_attack = 0.0
                         _f = '左' if self.attack_facing == 'left' else '右'
                         print(f"  ▶ 已恢復攻擊（朝{_f}）。" +
                               (f"下次移動：{wait:.0f} 秒後" if self.enable_move else ""))
@@ -710,6 +804,9 @@ def parse_args(argv=None):
                         "定點防失效光位移不夠，要真的換邊；此旗標恢復舊行為）")
     p.add_argument("--swap-every", type=int, default=1,
                    help="每幾次挪步換一次邊（預設 1 = 每次都換；配合 interval 約 45~55 秒換一邊）")
+    p.add_argument("--no-smart-face", action="store_true",
+                   help="關閉「哪邊動靜多打哪邊」偵測（預設開啟：每 8~14 秒比較角色左右"
+                        "兩側畫面動靜量，怪多的那邊就轉過去打；需 mss/numpy，失敗自動退回輪流換邊）")
     p.add_argument("--jump-in-place", action="store_true",
                    help="改用『原地跳』重定位（直上直下不位移，小平台不會掉下去）")
     p.add_argument("--jump-key", default="alt", choices=sorted(_SCAN),
@@ -740,7 +837,7 @@ def main(argv=None):
                     edge_margin=args.edge_margin, dispel_buff=args.dispel_buff,
                     dispel_interval=args.dispel_interval,
                     alternate_face=not args.fixed_face, swap_every=args.swap_every,
-                    dry_run=args.dry_run)
+                    smart_face=not args.no_smart_face, dry_run=args.dry_run)
     return hw.run(args.window)
 
 
