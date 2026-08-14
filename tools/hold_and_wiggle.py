@@ -184,7 +184,7 @@ class HoldWiggle:
                  edge_guard=False, edge_margin=6,
                  dispel_buff=False, dispel_interval=5.0,
                  alternate_face=True, swap_every=1,
-                 smart_face=True, dry_run=False):
+                 smart_face=True, tuning_path=None, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
@@ -211,6 +211,11 @@ class HoldWiggle:
         self._np = None                             # numpy（延遲載入）
         self._smart_next = 0.0                      # 下次動靜檢查的時間
         self._next_attack = 0.0                     # 下次攻擊時間（帶隨機抖動）
+        # 調參 UI（tools/tuner.py）寫的檔；執行中每 2 秒偵測異動並套用，免重啟
+        self.tuning_path = tuning_path
+        self.max_step_seconds = None                # 每步按方向鍵秒數上限（量平台後由 UI 設定）
+        self._tuning_mtime = 0.0
+        self._tuning_next_check = 0.0
         self._tm = None                             # TemplateMatcher（延遲建立）
         self._dispel_roi = None                     # buff 列 ROI；None = 右上角自動推算
         self._dispel_last = 0.0
@@ -280,6 +285,74 @@ class HoldWiggle:
         if counts is not None and face != fallback:
             pass  # 動靜壓過輪流：訊息由呼叫端印
         return face
+
+    # ---- 調參檔熱載入（tools/tuner.py 的 UI 寫檔，這裡即時套用）----
+    _TUNABLE = {
+        # 檔案鍵名 → (屬性名, 轉型)
+        "attack_interval": ("attack_interval", float),
+        "interval_min": ("interval_min", float),
+        "interval_max": ("interval_max", float),
+        "move_time": ("move_time", float),
+        "max_step_seconds": ("max_step_seconds", float),
+        "edge_margin": ("edge_margin", int),
+        "swap_every": ("swap_every", int),
+        "alternate_face": ("alternate_face", bool),
+        "smart_face": ("smart_face", bool),
+        "dispel_interval": ("dispel_interval", float),
+    }
+
+    def _apply_tuning(self, data):
+        """套用調參 dict，回傳實際變更的 {鍵: 新值}。"""
+        changed = {}
+        for key, (attr, cast) in self._TUNABLE.items():
+            if key not in data or data[key] is None:
+                continue
+            try:
+                val = cast(data[key])
+            except (TypeError, ValueError):
+                continue
+            if getattr(self, attr, None) != val:
+                setattr(self, attr, val)
+                changed[key] = val
+        if self.interval_min > self.interval_max:
+            self.interval_min, self.interval_max = self.interval_max, self.interval_min
+        self.swap_every = max(1, self.swap_every)
+        # 量平台得到的安全上限：每步按鍵秒數不得超過（防走過頭掉平台）
+        if self.max_step_seconds and self.move_time > self.max_step_seconds:
+            self.move_time = self.max_step_seconds
+            changed["move_time(受max_step上限)"] = self.move_time
+        # 邊界安全界改了 → 以現有中心重算上下界
+        if "edge_margin" in changed and self._edge_center is not None:
+            self._edge_lo = self._edge_center - self.edge_margin
+            self._edge_hi = self._edge_center + self.edge_margin
+        return changed
+
+    def _maybe_reload_tuning(self):
+        """每 2 秒看一次調參檔有沒有變，有就套用（執行中即時生效、免重啟）。"""
+        if not self.tuning_path:
+            return
+        now = time.time()
+        if now < self._tuning_next_check:
+            return
+        self._tuning_next_check = now + 2.0
+        try:
+            mtime = os.path.getmtime(self.tuning_path)
+        except OSError:
+            return
+        if mtime == self._tuning_mtime:
+            return
+        self._tuning_mtime = mtime
+        try:
+            import yaml
+            with open(self.tuning_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[警告] 調參檔讀取失敗：{e}")
+            return
+        changed = self._apply_tuning(data)
+        if changed:
+            desc = "、".join(f"{k}={v}" for k, v in changed.items())
+            print(f"  ⚙ 已套用調參：{desc}")
 
     # ---- 擬人化：動靜偵測（哪邊怪多打哪邊，不需怪物模板）----
     def _init_smart(self):
@@ -647,6 +720,7 @@ class HoldWiggle:
                     break
 
                 if state == "RUNNING":
+                    self._maybe_reload_tuning()   # 調參 UI 改了值就即時套用
                     if self._user_intervened():
                         state = "PAUSED"
                         self._pending_face = self._user_direction() or self._pending_face
@@ -807,6 +881,9 @@ def parse_args(argv=None):
     p.add_argument("--no-smart-face", action="store_true",
                    help="關閉「哪邊動靜多打哪邊」偵測（預設開啟：每 8~14 秒比較角色左右"
                         "兩側畫面動靜量，怪多的那邊就轉過去打；需 mss/numpy，失敗自動退回輪流換邊）")
+    p.add_argument("--tuning", default=os.path.join("config", "tuning.yaml"),
+                   help="調參檔路徑（預設 config/tuning.yaml）；配合 tools/tuner.py 的 UI "
+                        "邊跑邊調，每 2 秒自動套用。檔案不存在則忽略")
     p.add_argument("--jump-in-place", action="store_true",
                    help="改用『原地跳』重定位（直上直下不位移，小平台不會掉下去）")
     p.add_argument("--jump-key", default="alt", choices=sorted(_SCAN),
@@ -837,7 +914,10 @@ def main(argv=None):
                     edge_margin=args.edge_margin, dispel_buff=args.dispel_buff,
                     dispel_interval=args.dispel_interval,
                     alternate_face=not args.fixed_face, swap_every=args.swap_every,
-                    smart_face=not args.no_smart_face, dry_run=args.dry_run)
+                    smart_face=not args.no_smart_face,
+                    tuning_path=(args.tuning if os.path.isabs(args.tuning)
+                                 else os.path.join(ROOT, args.tuning)),
+                    dry_run=args.dry_run)
     return hw.run(args.window)
 
 

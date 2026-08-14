@@ -51,6 +51,8 @@ desktop.ini
 # ===== 專案個人化 =====
 # 個人設定檔（保留 *.example.yaml 範例）
 config/settings.yaml
+# 調參 UI（tools/tuner.py）寫的個人調參檔
+config/tuning.yaml
 
 # 執行期輸出
 logs/

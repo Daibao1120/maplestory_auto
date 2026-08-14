@@ -60,7 +60,9 @@ maplestory-classic-bot/
 │   ├── commands/               # command book（移動/攻擊/走近…）＋ combat 攻擊決策
 │   └── rune/                   # rune 偵測與解謎（介面 + TODO）
 ├── tools/
-│   └── capture_template.py     # 小工具：框選截圖存成模板素材
+│   ├── capture_template.py     # 小工具：框選截圖存成模板素材
+│   ├── hold_and_wiggle.py      # 簡易掛機：連點攻擊＋動靜偵測換邊＋防掉落/防失效（bat 啟動）
+│   └── tuner.py                # 調參 UI：邊跑邊調參數（熱載入）＋按鍵記錄量平台＋偵測預覽
 ├── assets/
 │   └── templates/
 │       └── monsters/           # 放你自己的鱷魚截圖（見該資料夾 README；圖片不進版控）
@@ -162,6 +164,7 @@ python -m src.main --config config\settings.yaml
 7. **防攻擊失效**：定點站著打約 60 秒攻擊會失效，`combat.reposition_*` 控制「每 45~65 秒小步移動一下（往平台中心挪、絕不出邊界）＋那一輪換邊打」；`reposition_min_seconds: 0` 可關閉。
 8. **畫面邊緣探測（防掉落第二道防線）**：小地圖 1px ≈ 數十畫面 px、貼邊時太粗，`vision.edge_probe` 直接比較「角色腳下 vs 前方同高度」取樣區的平均色，前方不是同一種地面（水面/懸空）就不往那邊走；以腳下當基準免逐地圖校準。px 參數以 1371 寬視窗為準，視窗更大請等比放大。
 9. **不想要的 buff 自動點掉**：別人丟的「速度激發」等移速 buff 會讓步伐全部走過頭、一動就掉出平台。把要點掉的 buff 圖示截圖放進 `assets/templates/buffs/`（見該資料夾 README），`vision.buff_dispel` 偵測到就自動到右上角 buff 列按滑鼠右鍵移除。`tools/hold_and_wiggle.py` 亦支援（`--dispel-buff`，bat 已預設開啟）。
+10. **調參 UI**（`tools/run_tuner_admin.bat`）：視窗置頂、邊掛機邊調——參數存進 `config/tuning.yaml` 後，跑著的掛機工具 2 秒內自動套用（免重啟）。內建「量平台」：你手動從平台最左走到最右，UI 記錄方向鍵時長＋小地圖位移，算出平台寬、走路速度、「從中間走到邊要幾秒」，一鍵套用安全上限（edge_margin、max_step_seconds）。另有偵測預覽（人物定位／左右動靜／邊緣探測一鍵檢查）。
 
 ## 開發狀態
 
