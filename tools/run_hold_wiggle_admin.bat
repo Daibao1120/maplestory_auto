@@ -20,8 +20,9 @@ REM   --attack-interval 0.22  seconds between attack taps (smaller = faster)
 REM   --move-time 0.18        seconds the arrow is HELD per step. Below ~0.1 the
 REM                           character only turns to face and does NOT walk, so
 REM                           it looks like it did not move. Raise this to walk more.
-REM   --patrol-steps 2        how many steps to one side before turning back;
-REM                           SMALLER for a smaller platform (try 1 if you fall off)
+REM   --patrol-steps 1        how many steps to one side before turning back;
+REM                           1 = smallest (one short step each way). Raise only
+REM                           if the platform is wide.
 REM   --face left             starting attack direction ASSUMPTION. It does NOT
 REM                           force-turn at launch (keeps your character's current
 REM                           facing). When you manually switch sides in-game
@@ -35,7 +36,7 @@ REM                           or send any keys into your window. Click back on
 REM                           MapleStory and it auto-resumes. REMOVE this flag if
 REM                           you instead want it to grab focus back on popups.
 REM   --no-move               add this to NOT move at all, just keep attacking
-"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --patrol-steps 2 --face left --interval-min 40 --interval-max 55 --no-refocus
+"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.12 --patrol-steps 1 --face left --interval-min 40 --interval-max 55 --no-refocus
 
 echo.
 echo Finished. Press any key to close.
