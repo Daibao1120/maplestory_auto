@@ -9,9 +9,9 @@
 容易打一陣子就停、移動後接不回攻擊。連點（keydown+keyup 快速重複）不管遊戲是
 「按一下打一下」還是「按住連打」都吃得到，移動後也能無縫接回。
 
-  ┌─ 執行中：每 --attack-interval 秒點一下 --key；每幾秒巡邏挪一步（±patrol_steps 內來回）
-  ├─ 你按 方向鍵 介入 → 暫停（放開按鍵，把控制權還你）
-  ├─ 暫停中按 Ctrl → 恢復執行
+  ┌─ 執行中：每 --attack-interval 秒點一下 --key；每 40~55 秒巡邏挪一步（±patrol_steps 內來回）
+  ├─ 攻擊方向沿用你角色當下的面向；移動往反方向走完會自動轉回
+  ├─ 手動換邊：按 方向鍵 暫停 → 轉到你要的方向 → 按 Ctrl 恢復（會朝你最後面對的方向打）
   └─ 任何時候按 F12 → 完全結束
 
 ⚠️ 送鍵需求：遊戲多半以系統管理員權限執行，本腳本也必須「以系統管理員身分」
@@ -154,7 +154,7 @@ class HoldWiggle:
     QUIT_KEY = "f12"
     POLL = 0.03  # 秒；輪詢間隔
 
-    def __init__(self, attack_key="ctrl", interval_min=5.0, interval_max=12.0,
+    def __init__(self, attack_key="ctrl", interval_min=40.0, interval_max=55.0,
                  move_time=0.18, attack_interval=0.22, patrol_steps=2,
                  attack_facing="left", enable_move=True, refocus=True, dry_run=False):
         self.attack_key = attack_key
@@ -172,6 +172,7 @@ class HoldWiggle:
         self._was_fg = True                         # 上一圈楓之谷是否在前景（用來只在剛失焦時印一次）
         self._patrol_pos = 0                        # 目前離出發點幾步（正=右、負=左）
         self._patrol_dir = 1                        # 目前巡邏方向（+1 右 / -1 左）
+        self._pending_face = None                   # 暫停期間記下你最後按的方向，恢復時採用
 
     def _next_interval(self):
         """下一次移動的等待秒數：區間內隨機，避免固定週期像機器。"""
@@ -208,6 +209,14 @@ class HoldWiggle:
     def _user_intervened(self):
         """使用者是否按著方向鍵（攻擊鍵是我們自己在點，不算介入）。"""
         return any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS)
+
+    def _user_direction(self):
+        """使用者當下按的是左還右（用來記住你手動換邊的方向）；都沒按回 None。"""
+        if _pressed(_VK["left"]):
+            return "left"
+        if _pressed(_VK["right"]):
+            return "right"
+        return None
 
     def _game_is_foreground(self):
         return bool(self._hwnd) and _user32.GetForegroundWindow() == self._hwnd
@@ -274,10 +283,10 @@ class HoldWiggle:
             return 1
 
         move_desc = "不移動" if not self.enable_move else \
-            f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，移動後轉回{'左' if self.attack_facing == 'left' else '右'}）"
+            f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，移動後轉回攻擊方向）"
         print("=" * 56)
-        print(f" 連點「{self.attack_key}」攻擊、固定朝【{'左' if self.attack_facing == 'left' else '右'}】（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
-        print(f" 介入=方向鍵(暫停) | 恢復=Ctrl | 結束=F12")
+        print(f" 連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
+        print(f" 接手換邊=方向鍵暫停→轉向→Ctrl恢復 | 結束=F12")
         if self.dry_run:
             print(" [dry-run] 只印節奏、不送實體按鍵")
         print("=" * 56)
@@ -286,12 +295,13 @@ class HoldWiggle:
         cycle_start = time.time()
         wait = self._next_interval()
         last_attack = 0.0
-        if not self.dry_run:
-            self._reface()  # 開場先面向固定攻擊方向，確保第一批攻擊就朝對的邊
+        # 開場不強制轉向——沿用你啟動時角色本來面對的方向。attack_facing 只是假設值，
+        # 你手動換邊（暫停→轉向→Ctrl 恢復）後會自動更新成你最後面對的方向。
+        _f = '左' if self.attack_facing == 'left' else '右'
         if self.enable_move:
-            print(f"  開始攻擊（朝{'左' if self.attack_facing == 'left' else '右'}）；下次移動：{wait:.0f} 秒後")
+            print(f"  開始攻擊（假設朝{_f}，手動換邊會跟著更新）；下次移動：{wait:.0f} 秒後")
         else:
-            print(f"  開始攻擊（朝{'左' if self.attack_facing == 'left' else '右'}，不移動）")
+            print(f"  開始攻擊（假設朝{_f}，手動換邊會跟著更新，不移動）")
         try:
             while True:
                 if _pressed(_VK[self.QUIT_KEY]):
@@ -301,8 +311,13 @@ class HoldWiggle:
                 if state == "RUNNING":
                     if self._user_intervened():
                         state = "PAUSED"
-                        print("  ⏸ 偵測到你按方向鍵 → 暫停攻擊，控制權還你。按 Ctrl 恢復…")
-                        while self._user_intervened():
+                        self._pending_face = self._user_direction() or self._pending_face
+                        print("  ⏸ 你接手了 → 暫停攻擊。轉到你要打的方向後按 Ctrl 恢復"
+                              "（會朝你最後面對的那邊打）…")
+                        while self._user_intervened():   # 等你放開方向鍵，順便記住最後方向
+                            d = self._user_direction()
+                            if d:
+                                self._pending_face = d
                             time.sleep(self.POLL)
                         continue
 
@@ -332,15 +347,22 @@ class HoldWiggle:
                         last_attack = time.time()
 
                 elif state == "PAUSED":
+                    d = self._user_direction()      # 暫停期間持續記住你面對的方向
+                    if d:
+                        self._pending_face = d
                     if _pressed(_VK[self.RESUME_KEY]):
                         while _pressed(_VK[self.RESUME_KEY]):
                             time.sleep(self.POLL)
+                        if self._pending_face:       # 採用你手動換到的方向
+                            self.attack_facing = self._pending_face
+                            self._pending_face = None
                         state = "RUNNING"
                         cycle_start = time.time()
                         wait = self._next_interval()
                         last_attack = 0.0
-                        print(f"  ▶ 已恢復攻擊。" +
-                              (f"（下次移動：{wait:.0f} 秒後）" if self.enable_move else ""))
+                        _f = '左' if self.attack_facing == 'left' else '右'
+                        print(f"  ▶ 已恢復攻擊（朝{_f}）。" +
+                              (f"下次移動：{wait:.0f} 秒後" if self.enable_move else ""))
 
                 time.sleep(self.POLL)
         except KeyboardInterrupt:
@@ -361,16 +383,17 @@ def parse_args(argv=None):
                    help="攻擊鍵（預設 ctrl）；會被連續點擊")
     p.add_argument("--attack-interval", type=float, default=0.22,
                    help="兩次攻擊點擊的間隔秒數（預設 0.22，越小打越快）")
-    p.add_argument("--interval-min", type=float, default=5.0,
-                   help="兩次巡邏移動之間最短秒數（預設 5）")
-    p.add_argument("--interval-max", type=float, default=12.0,
-                   help="兩次巡邏移動之間最長秒數（預設 12）；實際每次在 min~max 隨機")
+    p.add_argument("--interval-min", type=float, default=40.0,
+                   help="兩次巡邏移動之間最短秒數（預設 40）；定點約 60 秒攻擊才會失效，故不用太頻繁")
+    p.add_argument("--interval-max", type=float, default=55.0,
+                   help="兩次巡邏移動之間最長秒數（預設 55，留在 60 秒失效前）；實際每次在 min~max 隨機")
     p.add_argument("--move-time", type=float, default=0.18,
                    help="每一步按住方向鍵秒數（預設 0.18）；太短(<0.1)角色只會轉身不走路")
     p.add_argument("--patrol-steps", type=int, default=2,
                    help="從出發點往單邊最多走幾步就折返（預設 2）；平台越小設越小")
     p.add_argument("--face", choices=("left", "right"), default="left",
-                   help="固定攻擊方向（預設 left）；巡邏移動後會轉回這一邊再攻擊")
+                   help="起始攻擊方向的『假設值』（預設 left）；開場不會強制轉向、沿用你角色"
+                        "當下面向，之後手動換邊（暫停→轉向→Ctrl）會自動更新")
     p.add_argument("--no-move", action="store_true",
                    help="完全不移動，只連點攻擊（只想定點刷攻擊時用）")
     p.add_argument("--no-refocus", action="store_true",
