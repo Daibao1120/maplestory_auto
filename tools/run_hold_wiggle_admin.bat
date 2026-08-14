@@ -29,8 +29,13 @@ REM                           (arrow to pause, turn, Ctrl to resume) it follows 
 REM   --interval-min 40       shortest gap between patrol steps (seconds).
 REM   --interval-max 55       Attacks go stale after ~60s standing still, so it
 REM                           repositions once before that. No need to move often.
+REM   --no-refocus            DEFAULT here. When you click away to another window
+REM                           (e.g. to type), it pauses and does NOT steal focus
+REM                           or send any keys into your window. Click back on
+REM                           MapleStory and it auto-resumes. REMOVE this flag if
+REM                           you instead want it to grab focus back on popups.
 REM   --no-move               add this to NOT move at all, just keep attacking
-"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --patrol-steps 2 --face left --interval-min 40 --interval-max 55
+"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --patrol-steps 2 --face left --interval-min 40 --interval-max 55 --no-refocus
 
 echo.
 echo Finished. Press any key to close.

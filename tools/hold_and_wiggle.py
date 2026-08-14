@@ -321,18 +321,29 @@ class HoldWiggle:
                             time.sleep(self.POLL)
                         continue
 
-                    # 送鍵前先確認楓之谷在前景；被別的視窗搶走就切回來（或跳過不亂送）
+                    # 送鍵前先確認楓之谷在前景。不在的話：
+                    #   refocus=True  → 切回楓之谷再打（別的視窗彈出時不中斷）
+                    #   refocus=False → 暫停不送鍵（你切走打字時它讓開、絕不打進你的視窗）
                     if not self.dry_run and not self._game_is_foreground():
-                        if self._was_fg:
-                            print("  ⚠ 焦點被別的視窗搶走"
-                                  + ("，切回楓之谷…" if self.refocus else "，暫停送鍵直到它回前景…"))
-                        ok = self._ensure_foreground() if self.refocus else False
-                        self._was_fg = ok
-                        if not ok:
-                            time.sleep(0.15)   # 沒切回來就別送鍵，避免打到別的視窗
+                        if self.refocus:
+                            if self._was_fg:
+                                print("  ⚠ 焦點被別的視窗搶走，切回楓之谷…")
+                            ok = self._ensure_foreground()
+                            self._was_fg = ok
+                            if not ok:
+                                time.sleep(0.15)
+                                continue
+                            print("  ✓ 已切回楓之谷，繼續攻擊")
+                        else:
+                            if self._was_fg:
+                                print("  ⏸ 你切到別的視窗（打字？）→ 暫停攻擊；"
+                                      "切回楓之谷會自動恢復")
+                            self._was_fg = False
+                            time.sleep(0.12)   # 讓開，完全不送鍵、不搶焦點
                             continue
-                        print("  ✓ 已切回楓之谷，繼續攻擊")
                     else:
+                        if not self._was_fg:   # 剛從別的視窗切回楓之谷
+                            print("  ▶ 回到楓之谷 → 自動恢復攻擊")
                         self._was_fg = True
 
                     now = time.time()
