@@ -150,10 +150,12 @@ class HoldWiggle:
     POLL = 0.03  # 秒；輪詢間隔
 
     def __init__(self, hold_key="ctrl", interval_min=45.0, interval_max=90.0,
-                 dry_run=False):
+                 move_time=0.08, enable_move=True, dry_run=False):
         self.hold_key = hold_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
+        self.move_time = float(move_time)   # 每個方向按住秒數（越小走越少）
+        self.enable_move = enable_move       # False = 完全不移動，只按住鍵
         self.dry_run = dry_run
         self._holding = False
 
@@ -195,20 +197,30 @@ class HoldWiggle:
         return any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS if k != self.hold_key)
 
     def _wiggle(self):
-        """放開按住鍵 → 隨機左右移動幾下 → 重新按住（模擬真人重定位）。"""
-        # 隨機方向起手、隨機步數、每步間隔不固定；偶爾多繞一下
+        """放開按住鍵 → 往一邊走一小步再走回來（淨位移≈0）→ 重新按住。
+
+        左右用「同樣的按住時間」，所以走過去多少就走回來多少，不會愈跑愈偏。
+        走路時間由 move_time 控制（小地圖小就設小一點）。enable_move=False 時
+        完全不移動，只是放開再按住鍵，純粹刷新按住狀態。
+        """
+        if not self.enable_move:
+            print("  ↻ 時間到 → 重新按住（不移動）")
+            self._hold_key_up()
+            time.sleep(random.uniform(0.1, 0.2))
+            self._hold_key_down()
+            return
+
         first = random.choice(("left", "right"))
-        seq = [first, "left" if first == "right" else "right"]
-        if random.random() < 0.4:            # 40% 機率多動一下，避免每次都剛好兩步
-            seq.append(random.choice(("left", "right")))
-        print(f"  ↻ 時間到 → 移動一下（{'→'.join(seq)}）")
+        second = "right" if first == "left" else "left"
+        # 兩邊同秒數 → 淨位移≈0；只加極小抖動讓時間不完全一樣
+        t = self.move_time
+        print(f"  ↻ 時間到 → 原地挪一下（{first}↔{second}，每邊 {t:.2f}s）")
         self._hold_key_up()
-        time.sleep(random.uniform(0.08, 0.2))
-        for d in seq:
-            # 走一小段（帶住方向鍵一段隨機時間），比單點更像真的走位
-            self._tap(d, hold=random.uniform(0.12, 0.35))
-            time.sleep(random.uniform(0.05, 0.18))
-        time.sleep(random.uniform(0.1, 0.25))
+        time.sleep(random.uniform(0.08, 0.16))
+        self._tap(first, hold=t + random.uniform(-0.01, 0.01))
+        time.sleep(random.uniform(0.04, 0.1))
+        self._tap(second, hold=t + random.uniform(-0.01, 0.01))
+        time.sleep(random.uniform(0.08, 0.16))
         self._hold_key_down()
 
     def run(self, window_keyword):
@@ -281,6 +293,10 @@ def parse_args(argv=None):
                    help="兩次移動之間最短秒數（預設 45）")
     p.add_argument("--interval-max", type=float, default=90.0,
                    help="兩次移動之間最長秒數（預設 90）；實際每次在 min~max 隨機")
+    p.add_argument("--move-time", type=float, default=0.08,
+                   help="每個方向按住秒數，越小走越少（預設 0.08）；左右對稱走回原點")
+    p.add_argument("--no-move", action="store_true",
+                   help="完全不移動，只持續按住鍵（換小圖或只想刷攻擊時用）")
     p.add_argument("--window", default="新楓之谷", help="遊戲視窗標題關鍵字")
     p.add_argument("--dry-run", action="store_true", help="只印節奏、不送實體按鍵")
     args = p.parse_args(argv)
@@ -295,7 +311,8 @@ def main(argv=None):
         return 1
     args = parse_args(argv)
     hw = HoldWiggle(hold_key=args.key, interval_min=args.interval_min,
-                    interval_max=args.interval_max, dry_run=args.dry_run)
+                    interval_max=args.interval_max, move_time=args.move_time,
+                    enable_move=not args.no_move, dry_run=args.dry_run)
     return hw.run(args.window)
 
 
