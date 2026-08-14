@@ -179,6 +179,7 @@ class HoldWiggle:
         self._mmloc = None                          # MinimapLocator
         self._edge_lo = None
         self._edge_hi = None
+        self._edge_center = None                    # 起始中心 x：移動一律往這裡回歸（小平台最安全）
         self._last_x = None                         # 最近一次成功讀到的玩家 x（抓不到時的後備）
         self.max_jump = max(25, self.edge_margin * 4)  # x 一次跳超過這麼多 px 視為誤判、丟棄
         self.refocus = refocus                      # 焦點被搶走時自動切回楓之谷
@@ -342,39 +343,42 @@ class HoldWiggle:
         time.sleep(random.uniform(0.05, 0.12))
 
     def _move_edge_guarded(self):
-        """用小地圖真實 x 決定方向、到安全界折返。
+        """往起始中心回歸（不走去邊界）——小平台最安全的移動。
 
-        抓不到當下 x 時**不再定在原地**（那會造成攻擊失效）：改用「最近一次已知 x」
-        判斷方向照樣移動——掛機時你站著不動，上次位置幾乎就是現在位置，安全。
-        真的從頭到尾沒讀到過才退成保守左右交替小步。
+        - 偏離中心 → 往中心那側走一步（把自己拉回來，永遠不往外走）。
+        - 已在中心（±1px）→ 只做一步極小交替，位置變一下夠重置定點失效即可。
+        - 抓不到當下 x → 用最近已知 x 判斷（掛機站著不動，位置幾乎沒變），照樣移動不定在原地。
+        - 完全沒讀到過 → 保守極小交替一步。
         """
         x = self._player_x()
         if x is not None:
             self._last_x = x
         ref = x if x is not None else self._last_x
+        c = self._edge_center
 
-        if ref is None:
-            # 完全沒讀到過位置 → 保守：左右交替一小步（不累積漂移），至少讓角色動一下
+        if ref is None or c is None:
             direction = "right" if self._patrol_dir > 0 else "left"
             self._patrol_dir *= -1
-            self._tap(direction, hold=min(self.move_time, 0.12))
+            self._tap(direction, hold=min(self.move_time, 0.1))
             if direction != self.attack_facing:
                 self._reface()
-            print(f"  ↻ 邊界巡邏（抓不到玩家點，保守交替小步 {'→右' if direction == 'right' else '←左'}）→ 接回攻擊")
+            print("  ↻ 回中巡邏（抓不到玩家點，保守極小交替）→ 接回攻擊")
             time.sleep(random.uniform(0.05, 0.12))
             return
 
-        if ref <= self._edge_lo:
-            self._patrol_dir = 1        # 太左 → 往右
-        elif ref >= self._edge_hi:
-            self._patrol_dir = -1       # 太右 → 往左
-        direction = "right" if self._patrol_dir > 0 else "left"
+        if ref > c + 1:
+            direction = "left"           # 偏右 → 往左回中心
+        elif ref < c - 1:
+            direction = "right"          # 偏左 → 往右回中心
+        else:
+            direction = "right" if self._patrol_dir > 0 else "left"
+            self._patrol_dir *= -1       # 已在中心：極小交替一步
         self._tap(direction, hold=self.move_time + random.uniform(-0.01, 0.01))
         if direction != self.attack_facing:
             self._reface()
         arrow = "→右" if direction == "right" else "←左"
         src = f"x={x}" if x is not None else f"x≈{ref}(最近已知)"
-        print(f"  ↻ 邊界巡邏 {arrow}（{src} 安全界[{self._edge_lo}~{self._edge_hi}]）→ 接回攻擊")
+        print(f"  ↻ 回中巡邏 {arrow}（{src} 中心={c}）→ 接回攻擊")
         time.sleep(random.uniform(0.05, 0.12))
 
     def run(self, window_keyword):
@@ -402,9 +406,10 @@ class HoldWiggle:
                     self.edge_guard = False
                 else:
                     self._last_x = sx
+                    self._edge_center = sx
                     self._edge_lo = sx - self.edge_margin
                     self._edge_hi = sx + self.edge_margin
-                    print(f"  ✓ edge-guard 啟用：起始 x={sx}，安全界[{self._edge_lo}~{self._edge_hi}]（±{self.edge_margin}px）")
+                    print(f"  ✓ edge-guard 啟用：中心 x={sx}（移動一律往這裡回歸，貼著中心不往外走）")
 
         if self.edge_guard:
             move_desc = (f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏，"
@@ -512,9 +517,10 @@ class HoldWiggle:
                             nx = self._player_x(retries=8, gap=0.15, fresh=True)
                             if nx is not None:
                                 self._last_x = nx
+                                self._edge_center = nx
                                 self._edge_lo = nx - self.edge_margin
                                 self._edge_hi = nx + self.edge_margin
-                                print(f"    edge-guard 重新定位：中心 x={nx}，安全界[{self._edge_lo}~{self._edge_hi}]")
+                                print(f"    edge-guard 重新定位：中心 x={nx}（往這裡回歸）")
                         state = "RUNNING"
                         cycle_start = time.time()
                         wait = self._next_interval()
