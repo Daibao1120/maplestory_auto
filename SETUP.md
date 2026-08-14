@@ -98,9 +98,15 @@ python tools/send_ctrl_to_maple.py --list
 
 常用參數（加在 `.bat` 那行 python 後面）：
 
-- `--attack-interval 0.15` 打更快　`--move-time 0.05` 挪更少　`--no-move` 完全不動只打
-- `--no-refocus` 焦點被搶走時不搶回來（只暫停，不跟你搶螢幕）
+- `--attack-interval 0.15` 打更快
+- **`--patrol-steps 3` 巡邏範圍**：往單邊最多走幾步就折返。定點打會無效所以要挪，
+  但平台很小 → 設小一點（**會掉下平台就調成 2**）。`--move-time 0.05` 每步更小。
+- `--interval-min 5 --interval-max 12` 每隔幾秒挪一步（要更常換位就調小）
+- `--no-move` 完全不動只打　`--no-refocus` 焦點被搶走不搶回（只暫停）
 - `--window 新楓之谷` 視窗標題關鍵字（預設就是這個）
+
+> 巡邏怎麼運作：角色往同方向一步一步走，走到 `patrol-steps` 步就折返往回走，
+> 在「±步數」的小範圍內來回掃——位置真的有變（攻擊才有效），又不會走出小平台。
 
 ---
 

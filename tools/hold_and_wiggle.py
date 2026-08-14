@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
-"""連續點擊攻擊鍵、每隔一段時間原地挪一下；按方向鍵就暫停，按 Ctrl 恢復。
+"""連續點擊攻擊鍵、定時在小範圍內巡邏挪一步；按方向鍵就暫停，按 Ctrl 恢復。
 
-用途：最單純的掛機節奏——連點攻擊鍵 farm，每隔 45~90 秒原地左右挪一下重定位，
-移動完立刻接回攻擊。你隨時可用方向鍵接管（腳本會讓出控制），處理完按 Ctrl 續掛。
+用途：最單純的掛機節奏——連點攻擊鍵 farm，每隔幾秒往同方向挪一小步、走到
+±patrol_steps 步就折返，讓角色在小平台內來回掃（定點打會無效，但平台又很小
+不能亂走）。移動完立刻接回攻擊。方向鍵接管、Ctrl 續掛、F12 結束。
 
 為何用「連點」而非「按住」：一次 SendInput keydown 不會 auto-repeat，靠按住撐
 容易打一陣子就停、移動後接不回攻擊。連點（keydown+keyup 快速重複）不管遊戲是
 「按一下打一下」還是「按住連打」都吃得到，移動後也能無縫接回。
 
-  ┌─ 執行中：每 --attack-interval 秒點一下 --key；每 45~90 秒原地挪一下
+  ┌─ 執行中：每 --attack-interval 秒點一下 --key；每幾秒巡邏挪一步（±patrol_steps 內來回）
   ├─ 你按 方向鍵 介入 → 暫停（放開按鍵，把控制權還你）
   ├─ 暫停中按 Ctrl → 恢復執行
   └─ 任何時候按 F12 → 完全結束
@@ -153,20 +154,23 @@ class HoldWiggle:
     QUIT_KEY = "f12"
     POLL = 0.03  # 秒；輪詢間隔
 
-    def __init__(self, attack_key="ctrl", interval_min=45.0, interval_max=90.0,
-                 move_time=0.08, attack_interval=0.22, enable_move=True,
-                 refocus=True, dry_run=False):
+    def __init__(self, attack_key="ctrl", interval_min=5.0, interval_max=12.0,
+                 move_time=0.08, attack_interval=0.22, patrol_steps=3,
+                 enable_move=True, refocus=True, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
-        self.move_time = float(move_time)          # 每個方向按住秒數（越小走越少）
+        self.move_time = float(move_time)          # 每步按住方向鍵秒數（越小步伐越小）
         self.attack_interval = float(attack_interval)  # 兩次攻擊點擊的間隔（秒）
+        self.patrol_steps = max(1, int(patrol_steps))  # 從中心往單邊最多走幾步就折返
         self.enable_move = enable_move              # False = 完全不移動，只連點攻擊
         self.refocus = refocus                      # 焦點被搶走時自動切回楓之谷
         self.dry_run = dry_run
         self._hwnd = None
         self._window_keyword = ""
         self._was_fg = True                         # 上一圈楓之谷是否在前景（用來只在剛失焦時印一次）
+        self._patrol_pos = 0                        # 目前離出發點幾步（正=右、負=左）
+        self._patrol_dir = 1                        # 目前巡邏方向（+1 右 / -1 左）
 
     def _next_interval(self):
         """下一次移動的等待秒數：區間內隨機，避免固定週期像機器。"""
@@ -227,17 +231,25 @@ class HoldWiggle:
         return _user32.GetForegroundWindow() == self._hwnd
 
     def _move(self):
-        """往一邊走一小步再走回來（淨位移≈0）。走完直接 return，
-        主迴圈下一圈就會馬上接回連點攻擊——這就是『移動後繼續攻擊』的關鍵。"""
+        """有邊界的巡邏：往目前方向挪『一小步』，走到 ±patrol_steps 步就折返。
+
+        角色只在小範圍內來回掃（不是回到同一點，也不會愈走愈遠走出小平台）。
+        每次只走一步 → 位置真的有變（解決定點攻擊無效），但被 patrol_steps 綁住
+        （解決平台很小）。走完直接 return，主迴圈下一圈立刻接回連點攻擊。
+        """
         if not self.enable_move:
             return
-        first = random.choice(("left", "right"))
-        second = "right" if first == "left" else "left"
+        direction = "right" if self._patrol_dir > 0 else "left"
         t = self.move_time
-        print(f"  ↻ 原地挪一下（{first}↔{second}，每邊 {t:.2f}s）→ 接回攻擊")
-        self._tap(first, hold=t + random.uniform(-0.01, 0.01))
-        time.sleep(random.uniform(0.04, 0.1))
-        self._tap(second, hold=t + random.uniform(-0.01, 0.01))
+        self._tap(direction, hold=t + random.uniform(-0.01, 0.01))
+        self._patrol_pos += self._patrol_dir
+        # 到單邊上限 → 反向，讓下一步往回走
+        if self._patrol_pos >= self.patrol_steps:
+            self._patrol_dir = -1
+        elif self._patrol_pos <= -self.patrol_steps:
+            self._patrol_dir = 1
+        arrow = "→右" if direction == "right" else "←左"
+        print(f"  ↻ 巡邏挪一步 {arrow}（位置 {self._patrol_pos:+d}/±{self.patrol_steps}）→ 接回攻擊")
         time.sleep(random.uniform(0.05, 0.12))
 
     def run(self, window_keyword):
@@ -252,7 +264,7 @@ class HoldWiggle:
             return 1
 
         move_desc = "不移動" if not self.enable_move else \
-            f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒原地挪一下"
+            f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步）"
         print("=" * 56)
         print(f" 連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
         print(f" 介入=方向鍵(暫停) | 恢復=Ctrl | 結束=F12")
@@ -337,14 +349,16 @@ def parse_args(argv=None):
                    help="攻擊鍵（預設 ctrl）；會被連續點擊")
     p.add_argument("--attack-interval", type=float, default=0.22,
                    help="兩次攻擊點擊的間隔秒數（預設 0.22，越小打越快）")
-    p.add_argument("--interval-min", type=float, default=45.0,
-                   help="兩次移動之間最短秒數（預設 45）")
-    p.add_argument("--interval-max", type=float, default=90.0,
-                   help="兩次移動之間最長秒數（預設 90）；實際每次在 min~max 隨機")
+    p.add_argument("--interval-min", type=float, default=5.0,
+                   help="兩次巡邏移動之間最短秒數（預設 5）")
+    p.add_argument("--interval-max", type=float, default=12.0,
+                   help="兩次巡邏移動之間最長秒數（預設 12）；實際每次在 min~max 隨機")
     p.add_argument("--move-time", type=float, default=0.08,
-                   help="每個方向按住秒數，越小走越少（預設 0.08）；左右對稱走回原點")
+                   help="每一步按住方向鍵秒數，越小步伐越小（預設 0.08）")
+    p.add_argument("--patrol-steps", type=int, default=3,
+                   help="從出發點往單邊最多走幾步就折返（預設 3）；平台越小設越小")
     p.add_argument("--no-move", action="store_true",
-                   help="完全不移動，只連點攻擊（換小圖或只想刷攻擊時用）")
+                   help="完全不移動，只連點攻擊（只想定點刷攻擊時用）")
     p.add_argument("--no-refocus", action="store_true",
                    help="焦點被搶走時不自動切回楓之谷（只暫停送鍵，等它自己回前景）")
     p.add_argument("--window", default="新楓之谷", help="遊戲視窗標題關鍵字")
@@ -362,7 +376,7 @@ def main(argv=None):
     args = parse_args(argv)
     hw = HoldWiggle(attack_key=args.key, interval_min=args.interval_min,
                     interval_max=args.interval_max, move_time=args.move_time,
-                    attack_interval=args.attack_interval,
+                    attack_interval=args.attack_interval, patrol_steps=args.patrol_steps,
                     enable_move=not args.no_move, refocus=not args.no_refocus,
                     dry_run=args.dry_run)
     return hw.run(args.window)
