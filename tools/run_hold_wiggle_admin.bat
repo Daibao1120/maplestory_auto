@@ -16,9 +16,13 @@ set PYTHONUNBUFFERED=1
 
 REM Edit the arguments below to taste:
 REM   --key ctrl              key held down continuously (default ctrl = attack)
-REM   --interval-min 45       shortest gap between moves (seconds)
+REM   --no-move               do NOT walk at all, just keep holding the key
+REM   --move-time 0.05        if you DO want a tiny reposition, set a small value
+REM                           and remove --no-move (left/right are symmetric,
+REM                           so the character returns to its starting spot)
+REM   --interval-min 45       shortest gap between the release/re-hold tick
 REM   --interval-max 90       longest gap; each wait is randomized in this range
-"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --interval-min 45 --interval-max 90
+"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --no-move --interval-min 45 --interval-max 90
 
 echo.
 echo Finished. Press any key to close.
