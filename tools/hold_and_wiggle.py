@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
-"""持續按住一個鍵、每隔 N 秒左右動一下；偵測到你親自按方向鍵就暫停，按 Ctrl 恢復。
+"""連續點擊攻擊鍵、每隔一段時間原地挪一下；按方向鍵就暫停，按 Ctrl 恢復。
 
-用途：最單純的掛機節奏——按住攻擊鍵farm，每 60 秒左右各點一下重定位，
-避免長時間定點。你隨時可用方向鍵接管（腳本會讓出控制），處理完按 Ctrl 續掛。
+用途：最單純的掛機節奏——連點攻擊鍵 farm，每隔 45~90 秒原地左右挪一下重定位，
+移動完立刻接回攻擊。你隨時可用方向鍵接管（腳本會讓出控制），處理完按 Ctrl 續掛。
 
-  ┌─ 執行中：按住 --key，每 --interval 秒放開→點左→點右→再按住
-  ├─ 你按 方向鍵 介入 → 暫停（放開所有鍵，把控制權還你）
+為何用「連點」而非「按住」：一次 SendInput keydown 不會 auto-repeat，靠按住撐
+容易打一陣子就停、移動後接不回攻擊。連點（keydown+keyup 快速重複）不管遊戲是
+「按一下打一下」還是「按住連打」都吃得到，移動後也能無縫接回。
+
+  ┌─ 執行中：每 --attack-interval 秒點一下 --key；每 45~90 秒原地挪一下
+  ├─ 你按 方向鍵 介入 → 暫停（放開按鍵，把控制權還你）
   ├─ 暫停中按 Ctrl → 恢復執行
   └─ 任何時候按 F12 → 完全結束
 
@@ -149,18 +153,18 @@ class HoldWiggle:
     QUIT_KEY = "f12"
     POLL = 0.03  # 秒；輪詢間隔
 
-    def __init__(self, hold_key="ctrl", interval_min=45.0, interval_max=90.0,
-                 move_time=0.08, enable_move=True, dry_run=False):
-        self.hold_key = hold_key
+    def __init__(self, attack_key="ctrl", interval_min=45.0, interval_max=90.0,
+                 move_time=0.08, attack_interval=0.22, enable_move=True, dry_run=False):
+        self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
-        self.move_time = float(move_time)   # 每個方向按住秒數（越小走越少）
-        self.enable_move = enable_move       # False = 完全不移動，只按住鍵
+        self.move_time = float(move_time)          # 每個方向按住秒數（越小走越少）
+        self.attack_interval = float(attack_interval)  # 兩次攻擊點擊的間隔（秒）
+        self.enable_move = enable_move              # False = 完全不移動，只連點攻擊
         self.dry_run = dry_run
-        self._holding = False
 
     def _next_interval(self):
-        """下一次 wiggle 的等待秒數：區間內隨機，避免固定週期像機器。"""
+        """下一次移動的等待秒數：區間內隨機，避免固定週期像機器。"""
         return random.uniform(self.interval_min, self.interval_max)
 
     # ---- 送鍵包裝（dry_run 只印不送）----
@@ -179,49 +183,31 @@ class HoldWiggle:
     def _tap(self, key, hold=None):
         self._down(key)
         # 按住時間帶隨機（人不會每次都按一樣久）
-        time.sleep(hold if hold is not None else random.uniform(0.06, 0.16))
+        time.sleep(hold if hold is not None else random.uniform(0.04, 0.10))
         self._up(key)
 
-    def _hold_key_down(self):
-        if not self._holding:
-            self._down(self.hold_key)
-            self._holding = True
-
-    def _hold_key_up(self):
-        if self._holding:
-            self._up(self.hold_key)
-            self._holding = False
+    def _attack_once(self):
+        """點一下攻擊鍵。連續呼叫 = 連續攻擊，比『按住不放』可靠——
+        不管遊戲是『按一下打一下』還是『按住連打』都吃得到，移動後也能無縫接回。"""
+        self._tap(self.attack_key, hold=random.uniform(0.04, 0.09))
 
     def _user_intervened(self):
-        # hold_key 是腳本自己按著的，排除；只看方向鍵是否被「使用者」按下。
-        return any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS if k != self.hold_key)
+        """使用者是否按著方向鍵（攻擊鍵是我們自己在點，不算介入）。"""
+        return any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS)
 
-    def _wiggle(self):
-        """放開按住鍵 → 往一邊走一小步再走回來（淨位移≈0）→ 重新按住。
-
-        左右用「同樣的按住時間」，所以走過去多少就走回來多少，不會愈跑愈偏。
-        走路時間由 move_time 控制（小地圖小就設小一點）。enable_move=False 時
-        完全不移動，只是放開再按住鍵，純粹刷新按住狀態。
-        """
+    def _move(self):
+        """往一邊走一小步再走回來（淨位移≈0）。走完直接 return，
+        主迴圈下一圈就會馬上接回連點攻擊——這就是『移動後繼續攻擊』的關鍵。"""
         if not self.enable_move:
-            print("  ↻ 時間到 → 重新按住（不移動）")
-            self._hold_key_up()
-            time.sleep(random.uniform(0.1, 0.2))
-            self._hold_key_down()
             return
-
         first = random.choice(("left", "right"))
         second = "right" if first == "left" else "left"
-        # 兩邊同秒數 → 淨位移≈0；只加極小抖動讓時間不完全一樣
         t = self.move_time
-        print(f"  ↻ 時間到 → 原地挪一下（{first}↔{second}，每邊 {t:.2f}s）")
-        self._hold_key_up()
-        time.sleep(random.uniform(0.08, 0.16))
+        print(f"  ↻ 原地挪一下（{first}↔{second}，每邊 {t:.2f}s）→ 接回攻擊")
         self._tap(first, hold=t + random.uniform(-0.01, 0.01))
         time.sleep(random.uniform(0.04, 0.1))
         self._tap(second, hold=t + random.uniform(-0.01, 0.01))
-        time.sleep(random.uniform(0.08, 0.16))
-        self._hold_key_down()
+        time.sleep(random.uniform(0.05, 0.12))
 
     def run(self, window_keyword):
         hwnd = _find_window(window_keyword)
@@ -232,19 +218,23 @@ class HoldWiggle:
             print("[錯誤] 無法把遊戲切到前景，按鍵不會生效。")
             return 1
 
+        move_desc = "不移動" if not self.enable_move else \
+            f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒原地挪一下"
         print("=" * 56)
-        print(f" 按住「{self.hold_key}」掛機；每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒"
-              f"隨機移動一下")
+        print(f" 連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
         print(f" 介入=方向鍵(暫停) | 恢復=Ctrl | 結束=F12")
         if self.dry_run:
             print(" [dry-run] 只印節奏、不送實體按鍵")
         print("=" * 56)
 
         state = "RUNNING"
-        self._hold_key_down()
         cycle_start = time.time()
         wait = self._next_interval()
-        print(f"  （下次移動：{wait:.0f} 秒後）")
+        last_attack = 0.0
+        if self.enable_move:
+            print(f"  開始攻擊；下次移動：{wait:.0f} 秒後")
+        else:
+            print("  開始攻擊（不移動）")
         try:
             while True:
                 if _pressed(_VK[self.QUIT_KEY]):
@@ -253,42 +243,52 @@ class HoldWiggle:
 
                 if state == "RUNNING":
                     if self._user_intervened():
-                        self._hold_key_up()
                         state = "PAUSED"
-                        print("  ⏸ 偵測到你按方向鍵 → 暫停，控制權還你。按 Ctrl 恢復掛機…")
-                        # 等使用者放開方向鍵，避免立刻又被判為 Ctrl 誤觸
+                        print("  ⏸ 偵測到你按方向鍵 → 暫停攻擊，控制權還你。按 Ctrl 恢復…")
                         while self._user_intervened():
                             time.sleep(self.POLL)
                         continue
-                    if time.time() - cycle_start >= wait:
-                        self._wiggle()
+                    now = time.time()
+                    if self.enable_move and now - cycle_start >= wait:
+                        self._move()
                         cycle_start = time.time()
                         wait = self._next_interval()
+                        last_attack = 0.0  # 移動後立刻接回攻擊（下一圈馬上點）
                         print(f"  （下次移動：{wait:.0f} 秒後）")
+                    elif now - last_attack >= self.attack_interval:
+                        self._attack_once()
+                        last_attack = time.time()
 
                 elif state == "PAUSED":
                     if _pressed(_VK[self.RESUME_KEY]):
-                        # 等放開 Ctrl 再開始，避免 wiggle 前的按住卡住
                         while _pressed(_VK[self.RESUME_KEY]):
                             time.sleep(self.POLL)
                         state = "RUNNING"
-                        self._hold_key_down()
                         cycle_start = time.time()
                         wait = self._next_interval()
-                        print(f"  ▶ 已恢復，繼續按住掛機。（下次移動：{wait:.0f} 秒後）")
+                        last_attack = 0.0
+                        print(f"  ▶ 已恢復攻擊。" +
+                              (f"（下次移動：{wait:.0f} 秒後）" if self.enable_move else ""))
 
                 time.sleep(self.POLL)
         except KeyboardInterrupt:
             print("\n[Ctrl+C] 中斷。")
         finally:
-            self._hold_key_up()  # 收尾一定放開，別讓遊戲卡在按住狀態
+            # 保險起見放開攻擊鍵與方向鍵，別讓遊戲卡在按住狀態
+            for k in (self.attack_key, "left", "right"):
+                try:
+                    self._up(k)
+                except Exception:
+                    pass
         return 0
 
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description="按住鍵 + 定時左右動一下的簡易掛機節奏器")
     p.add_argument("--key", default="ctrl", choices=sorted(_SCAN),
-                   help="要持續按住的鍵（預設 ctrl＝攻擊）")
+                   help="攻擊鍵（預設 ctrl）；會被連續點擊")
+    p.add_argument("--attack-interval", type=float, default=0.22,
+                   help="兩次攻擊點擊的間隔秒數（預設 0.22，越小打越快）")
     p.add_argument("--interval-min", type=float, default=45.0,
                    help="兩次移動之間最短秒數（預設 45）")
     p.add_argument("--interval-max", type=float, default=90.0,
@@ -296,7 +296,7 @@ def parse_args(argv=None):
     p.add_argument("--move-time", type=float, default=0.08,
                    help="每個方向按住秒數，越小走越少（預設 0.08）；左右對稱走回原點")
     p.add_argument("--no-move", action="store_true",
-                   help="完全不移動，只持續按住鍵（換小圖或只想刷攻擊時用）")
+                   help="完全不移動，只連點攻擊（換小圖或只想刷攻擊時用）")
     p.add_argument("--window", default="新楓之谷", help="遊戲視窗標題關鍵字")
     p.add_argument("--dry-run", action="store_true", help="只印節奏、不送實體按鍵")
     args = p.parse_args(argv)
@@ -310,8 +310,9 @@ def main(argv=None):
         print("[錯誤] 本工具僅支援 Windows（需 SendInput 送鍵）。")
         return 1
     args = parse_args(argv)
-    hw = HoldWiggle(hold_key=args.key, interval_min=args.interval_min,
+    hw = HoldWiggle(attack_key=args.key, interval_min=args.interval_min,
                     interval_max=args.interval_max, move_time=args.move_time,
+                    attack_interval=args.attack_interval,
                     enable_move=not args.no_move, dry_run=args.dry_run)
     return hw.run(args.window)
 
