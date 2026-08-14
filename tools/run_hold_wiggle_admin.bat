@@ -17,13 +17,15 @@ set PYTHONUNBUFFERED=1
 REM Edit the arguments below to taste:
 REM   --key ctrl              attack key, tapped repeatedly (default ctrl)
 REM   --attack-interval 0.22  seconds between attack taps (smaller = faster)
-REM   --move-time 0.05        seconds walked per step (smaller = smaller step)
-REM   --patrol-steps 3        how many steps to one side before turning back;
-REM                           SMALLER for a smaller platform (try 2 if you fall off)
+REM   --move-time 0.18        seconds the arrow is HELD per step. Below ~0.1 the
+REM                           character only turns to face and does NOT walk, so
+REM                           it looks like it did not move. Raise this to walk more.
+REM   --patrol-steps 2        how many steps to one side before turning back;
+REM                           SMALLER for a smaller platform (try 1 if you fall off)
 REM   --interval-min 5        shortest gap between patrol steps (seconds)
 REM   --interval-max 12       longest gap; each wait is randomized in this range
 REM   --no-move               add this to NOT move at all, just keep attacking
-"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.05 --patrol-steps 3 --interval-min 5 --interval-max 12
+"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --patrol-steps 2 --interval-min 5 --interval-max 12
 
 echo.
 echo Finished. Press any key to close.

@@ -155,7 +155,7 @@ class HoldWiggle:
     POLL = 0.03  # 秒；輪詢間隔
 
     def __init__(self, attack_key="ctrl", interval_min=5.0, interval_max=12.0,
-                 move_time=0.08, attack_interval=0.22, patrol_steps=3,
+                 move_time=0.18, attack_interval=0.22, patrol_steps=2,
                  enable_move=True, refocus=True, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
@@ -353,10 +353,10 @@ def parse_args(argv=None):
                    help="兩次巡邏移動之間最短秒數（預設 5）")
     p.add_argument("--interval-max", type=float, default=12.0,
                    help="兩次巡邏移動之間最長秒數（預設 12）；實際每次在 min~max 隨機")
-    p.add_argument("--move-time", type=float, default=0.08,
-                   help="每一步按住方向鍵秒數，越小步伐越小（預設 0.08）")
-    p.add_argument("--patrol-steps", type=int, default=3,
-                   help="從出發點往單邊最多走幾步就折返（預設 3）；平台越小設越小")
+    p.add_argument("--move-time", type=float, default=0.18,
+                   help="每一步按住方向鍵秒數（預設 0.18）；太短(<0.1)角色只會轉身不走路")
+    p.add_argument("--patrol-steps", type=int, default=2,
+                   help="從出發點往單邊最多走幾步就折返（預設 2）；平台越小設越小")
     p.add_argument("--no-move", action="store_true",
                    help="完全不移動，只連點攻擊（只想定點刷攻擊時用）")
     p.add_argument("--no-refocus", action="store_true",
