@@ -154,14 +154,19 @@ class HoldWiggle:
     POLL = 0.03  # 秒；輪詢間隔
 
     def __init__(self, attack_key="ctrl", interval_min=45.0, interval_max=90.0,
-                 move_time=0.08, attack_interval=0.22, enable_move=True, dry_run=False):
+                 move_time=0.08, attack_interval=0.22, enable_move=True,
+                 refocus=True, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
         self.move_time = float(move_time)          # 每個方向按住秒數（越小走越少）
         self.attack_interval = float(attack_interval)  # 兩次攻擊點擊的間隔（秒）
         self.enable_move = enable_move              # False = 完全不移動，只連點攻擊
+        self.refocus = refocus                      # 焦點被搶走時自動切回楓之谷
         self.dry_run = dry_run
+        self._hwnd = None
+        self._window_keyword = ""
+        self._was_fg = True                         # 上一圈楓之谷是否在前景（用來只在剛失焦時印一次）
 
     def _next_interval(self):
         """下一次移動的等待秒數：區間內隨機，避免固定週期像機器。"""
@@ -195,6 +200,32 @@ class HoldWiggle:
         """使用者是否按著方向鍵（攻擊鍵是我們自己在點，不算介入）。"""
         return any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS)
 
+    def _game_is_foreground(self):
+        return bool(self._hwnd) and _user32.GetForegroundWindow() == self._hwnd
+
+    def _ensure_foreground(self):
+        """確認楓之谷是前景視窗；不是就切回來。回傳最終是否在前景。
+
+        視窗若不見了（例如遊戲重開）→ 依標題重新尋找。這是『跳出其他視窗會干擾』
+        的解法：焦點被搶走時把楓之谷切回來，真的切不回來就回報 False，主迴圈
+        會跳過這一圈不送鍵——避免把 Ctrl 打進別的視窗。
+        """
+        if self.dry_run:
+            return True
+        if not self._hwnd or not _user32.IsWindow(self._hwnd):
+            self._hwnd = _find_window(self._window_keyword)  # 視窗換了 handle → 重找
+            if not self._hwnd:
+                return False
+        if _user32.GetForegroundWindow() == self._hwnd:
+            return True
+        # 被別的視窗搶走 → 空按 ALT 解前景鎖再切回楓之谷
+        _user32.keybd_event(0x12, 0, 0, 0)
+        _user32.keybd_event(0x12, 0, 2, 0)
+        _user32.ShowWindow(self._hwnd, 9)  # SW_RESTORE
+        _user32.SetForegroundWindow(self._hwnd)
+        time.sleep(0.05)
+        return _user32.GetForegroundWindow() == self._hwnd
+
     def _move(self):
         """往一邊走一小步再走回來（淨位移≈0）。走完直接 return，
         主迴圈下一圈就會馬上接回連點攻擊——這就是『移動後繼續攻擊』的關鍵。"""
@@ -214,6 +245,8 @@ class HoldWiggle:
         if hwnd is None:
             print(f"[錯誤] 找不到視窗標題含「{window_keyword}」的遊戲。請先開好遊戲。")
             return 1
+        self._hwnd = hwnd
+        self._window_keyword = window_keyword
         if not self.dry_run and not _foreground(hwnd):
             print("[錯誤] 無法把遊戲切到前景，按鍵不會生效。")
             return 1
@@ -248,6 +281,21 @@ class HoldWiggle:
                         while self._user_intervened():
                             time.sleep(self.POLL)
                         continue
+
+                    # 送鍵前先確認楓之谷在前景；被別的視窗搶走就切回來（或跳過不亂送）
+                    if not self.dry_run and not self._game_is_foreground():
+                        if self._was_fg:
+                            print("  ⚠ 焦點被別的視窗搶走"
+                                  + ("，切回楓之谷…" if self.refocus else "，暫停送鍵直到它回前景…"))
+                        ok = self._ensure_foreground() if self.refocus else False
+                        self._was_fg = ok
+                        if not ok:
+                            time.sleep(0.15)   # 沒切回來就別送鍵，避免打到別的視窗
+                            continue
+                        print("  ✓ 已切回楓之谷，繼續攻擊")
+                    else:
+                        self._was_fg = True
+
                     now = time.time()
                     if self.enable_move and now - cycle_start >= wait:
                         self._move()
@@ -297,6 +345,8 @@ def parse_args(argv=None):
                    help="每個方向按住秒數，越小走越少（預設 0.08）；左右對稱走回原點")
     p.add_argument("--no-move", action="store_true",
                    help="完全不移動，只連點攻擊（換小圖或只想刷攻擊時用）")
+    p.add_argument("--no-refocus", action="store_true",
+                   help="焦點被搶走時不自動切回楓之谷（只暫停送鍵，等它自己回前景）")
     p.add_argument("--window", default="新楓之谷", help="遊戲視窗標題關鍵字")
     p.add_argument("--dry-run", action="store_true", help="只印節奏、不送實體按鍵")
     args = p.parse_args(argv)
@@ -313,7 +363,8 @@ def main(argv=None):
     hw = HoldWiggle(attack_key=args.key, interval_min=args.interval_min,
                     interval_max=args.interval_max, move_time=args.move_time,
                     attack_interval=args.attack_interval,
-                    enable_move=not args.no_move, dry_run=args.dry_run)
+                    enable_move=not args.no_move, refocus=not args.no_refocus,
+                    dry_run=args.dry_run)
     return hw.run(args.window)
 
 
