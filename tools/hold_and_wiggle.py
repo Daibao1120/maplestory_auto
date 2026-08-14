@@ -29,9 +29,13 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.wintypes as wt
+import os
 import random
 import sys
 import time
+
+# repo 根目錄（本檔在 tools/ 底下）——edge-guard 需要 import src.capture / src.vision
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ============================================================
 #  低階送鍵：ctypes SendInput（scancode；方向鍵加 EXTENDEDKEY）
@@ -157,7 +161,8 @@ class HoldWiggle:
     def __init__(self, attack_key="ctrl", interval_min=40.0, interval_max=55.0,
                  move_time=0.18, attack_interval=0.22, patrol_steps=2,
                  attack_facing="left", enable_move=True, refocus=True,
-                 jump_in_place=False, jump_key="alt", dry_run=False):
+                 jump_in_place=False, jump_key="alt",
+                 edge_guard=False, edge_margin=6, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
@@ -168,6 +173,12 @@ class HoldWiggle:
         self.enable_move = enable_move              # False = 完全不移動，只連點攻擊
         self.jump_in_place = jump_in_place          # True = 改用原地跳重定位（小平台不會掉下去）
         self.jump_key = jump_key                    # 跳躍鍵
+        self.edge_guard = edge_guard                # True = 用小地圖真實 x 巡邏、到邊界折返（不會走出平台）
+        self.edge_margin = int(edge_margin)         # 安全界：起始 x ± 這麼多小地圖 px
+        self._cap = None                            # ScreenCapture（延遲建立）
+        self._mmloc = None                          # MinimapLocator
+        self._edge_lo = None
+        self._edge_hi = None
         self.refocus = refocus                      # 焦點被搶走時自動切回楓之谷
         self.dry_run = dry_run
         self._hwnd = None
@@ -211,6 +222,31 @@ class HoldWiggle:
     def _reface(self):
         """把面向轉回固定攻擊方向（極短按，只轉身不走路），這樣攻擊永遠朝同一邊。"""
         self._tap(self.attack_facing, hold=0.03)
+
+    # ---- edge-guard：用小地圖真實 x 判斷邊界 ----
+    def _init_edge_guard(self):
+        """延遲載入辨識模組、建立擷取器與小地圖定位器。缺套件會丟例外，由呼叫端接。"""
+        if ROOT not in sys.path:
+            sys.path.insert(0, ROOT)
+        from src.capture import ScreenCapture   # 需要 mss
+        from src.vision import MinimapLocator    # 需要 opencv/numpy
+        import yaml
+        cfgpath = os.path.join(ROOT, "config", "settings.yaml")
+        if not os.path.exists(cfgpath):
+            cfgpath = os.path.join(ROOT, "config", "settings.example.yaml")
+        with open(cfgpath, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        self._cap = ScreenCapture(backend="mss", window_title=self._window_keyword)
+        self._mmloc = MinimapLocator(cfg["vision"]["minimap"])
+
+    def _player_x(self):
+        """讀目前玩家在小地圖上的 x；抓不到回 None（只讀畫面，不送鍵、不搶焦點）。"""
+        try:
+            frame = self._cap.grab()
+            p = self._mmloc.locate_player(frame)
+            return int(p[0]) if p else None
+        except Exception:
+            return None
 
     def _user_intervened(self):
         """使用者是否按著方向鍵（攻擊鍵是我們自己在點，不算介入）。"""
@@ -265,6 +301,9 @@ class HoldWiggle:
             print("  ↻ 原地跳一下（不位移、掉不出平台）→ 接回攻擊")
             time.sleep(random.uniform(0.1, 0.2))
             return
+        if self.edge_guard:
+            self._move_edge_guarded()
+            return
         direction = "right" if self._patrol_dir > 0 else "left"
         t = self.move_time
         self._tap(direction, hold=t + random.uniform(-0.01, 0.01))
@@ -283,6 +322,26 @@ class HoldWiggle:
         print(f"  ↻ 巡邏挪一步 {arrow}（位置 {self._patrol_pos:+d}/±{self.patrol_steps}）{refaced} → 接回攻擊")
         time.sleep(random.uniform(0.05, 0.12))
 
+    def _move_edge_guarded(self):
+        """用小地圖真實 x 決定方向：到安全界就折返，抓不到玩家點就保守不移動。"""
+        x = self._player_x()
+        if x is None:
+            print("  ⚠ edge-guard 這次抓不到小地圖玩家點 → 保守起見不移動")
+            return
+        if x <= self._edge_lo:
+            self._patrol_dir = 1        # 太左 → 往右
+        elif x >= self._edge_hi:
+            self._patrol_dir = -1       # 太右 → 往左
+        direction = "right" if self._patrol_dir > 0 else "left"
+        self._tap(direction, hold=self.move_time + random.uniform(-0.01, 0.01))
+        refaced = ""
+        if direction != self.attack_facing:
+            self._reface()
+            refaced = f"，轉回{'左' if self.attack_facing == 'left' else '右'}攻擊"
+        arrow = "→右" if direction == "right" else "←左"
+        print(f"  ↻ 邊界巡邏 {arrow}（x={x} 安全界[{self._edge_lo}~{self._edge_hi}]）{refaced} → 接回攻擊")
+        time.sleep(random.uniform(0.05, 0.12))
+
     def run(self, window_keyword):
         hwnd = _find_window(window_keyword)
         if hwnd is None:
@@ -294,8 +353,34 @@ class HoldWiggle:
             print("[錯誤] 無法把遊戲切到前景，按鍵不會生效。")
             return 1
 
-        move_desc = "不移動" if not self.enable_move else \
-            f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，移動後轉回攻擊方向）"
+        # edge-guard：建立擷取/定位器，記下起始 x 當中心、設安全左右界
+        if self.edge_guard and not self.dry_run:
+            try:
+                self._init_edge_guard()
+            except Exception as e:
+                print(f"[警告] edge-guard 初始化失敗（缺 opencv/mss？{e}）→ 改用一般巡邏")
+                self.edge_guard = False
+            if self.edge_guard:
+                sx = None
+                for _ in range(10):
+                    sx = self._player_x()
+                    if sx is not None:
+                        break
+                    time.sleep(0.2)
+                if sx is None:
+                    print("[警告] edge-guard 抓不到小地圖玩家點 → 改用一般巡邏（請確認遊戲在前景、小地圖有開）")
+                    self.edge_guard = False
+                else:
+                    self._edge_lo = sx - self.edge_margin
+                    self._edge_hi = sx + self.edge_margin
+                    print(f"  ✓ edge-guard 啟用：起始 x={sx}，安全界[{self._edge_lo}~{self._edge_hi}]（±{self.edge_margin}px）")
+
+        if self.edge_guard:
+            move_desc = (f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏，"
+                         f"用小地圖真實 x 到邊界折返（不會走出平台）")
+        else:
+            move_desc = "不移動" if not self.enable_move else \
+                f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，移動後轉回攻擊方向）"
         print("=" * 56)
         print(f" 連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
         print(f" 接手換邊=方向鍵暫停→轉向→Ctrl恢復 | 結束=F12")
@@ -409,6 +494,11 @@ class HoldWiggle:
                     self._up(k)
                 except Exception:
                     pass
+            if self._cap is not None:
+                try:
+                    self._cap.close()
+                except Exception:
+                    pass
         return 0
 
 
@@ -429,6 +519,10 @@ def parse_args(argv=None):
     p.add_argument("--face", choices=("left", "right"), default="left",
                    help="起始攻擊方向的『假設值』（預設 left）；開場不會強制轉向、沿用你角色"
                         "當下面向，之後手動換邊（暫停→轉向→Ctrl）會自動更新")
+    p.add_argument("--edge-guard", action="store_true",
+                   help="用小地圖真實 x 巡邏、到安全界折返（不會走出平台）；需 opencv/mss")
+    p.add_argument("--edge-margin", type=int, default=6,
+                   help="edge-guard 安全界：起始 x ± 這麼多小地圖 px（預設 6，平台窄設更小）")
     p.add_argument("--jump-in-place", action="store_true",
                    help="改用『原地跳』重定位（直上直下不位移，小平台不會掉下去）")
     p.add_argument("--jump-key", default="alt", choices=sorted(_SCAN),
@@ -455,7 +549,8 @@ def main(argv=None):
                     attack_interval=args.attack_interval, patrol_steps=args.patrol_steps,
                     attack_facing=args.face, enable_move=not args.no_move,
                     refocus=not args.no_refocus, jump_in_place=args.jump_in_place,
-                    jump_key=args.jump_key, dry_run=args.dry_run)
+                    jump_key=args.jump_key, edge_guard=args.edge_guard,
+                    edge_margin=args.edge_margin, dry_run=args.dry_run)
     return hw.run(args.window)
 
 
