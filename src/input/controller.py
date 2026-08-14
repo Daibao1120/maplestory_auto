@@ -35,6 +35,11 @@ class InputController:
         self.delay_min = humanize.get("action_delay_min", 0.05)
         self.delay_max = humanize.get("action_delay_max", 0.18)
         self.dry_run = dry_run
+        if _PDI_AVAILABLE:
+            # pydirectinput 預設每次送鍵後自動再睡 PAUSE=0.1 秒，會把「極短轉向
+            # 按鍵」硬拉長到 ~0.13 秒——超過 0.1 秒角色就會走一步，貼邊打怪時
+            # 每圈都往怪那側滑、慢慢滑出平台。節奏改由 humanize 隨機延遲控制。
+            pydirectinput.PAUSE = 0.0
 
     def _require_backend(self):
         if self.dry_run:

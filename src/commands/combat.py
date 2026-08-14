@@ -77,6 +77,50 @@ def decision_to_actions(decision, combo=3):
     return [{"action": "approach", "args": {"dir": decision.facing}}]
 
 
+def _margin_within(left, right, margin):
+    """把 margin 夾在「半個平台寬」以內。
+
+    margin 太大時左右折返門檻會交叉（left+margin >= right-margin），
+    左界檢查先成立會一路往右走出平台——窄平台上必須自動縮小。
+    """
+    span = right - left
+    return max(0, min(int(margin), span // 2 if span > 0 else 0))
+
+
+def plan_patrol(px, direction, left, right, margin=0):
+    """巡邏單步決策（純函式）：回傳 (方向, 是否到達折返點)。
+
+    px=None（小地圖讀不到玩家）→ (None, False)：位置不明就不該移動——
+    沿上次方向盲走是「巡邏走出平台」的主因之一。
+    margin 為「提前折返」的安全邊界：感知→送鍵有延遲、一步會走過頭，
+    貼著邊界才折返可能已經掉下去。
+    """
+    if px is None:
+        return None, False
+    margin = _margin_within(left, right, margin)
+    if px <= left + margin:
+        return "right", True
+    if px >= right - margin:
+        return "left", True
+    return direction, False
+
+
+def approach_is_safe(px, direction, left, right, margin=0):
+    """走近怪之前的邊界保險（純函式）：往 direction 再走一步是否安全。
+
+    怪可能站在折返點外（水裡／平台外側），不設限就會一路追出平台。
+    px=None（讀不到位置）一律視為不安全。
+    """
+    if px is None:
+        return False
+    margin = _margin_within(left, right, margin)
+    if direction == "left":
+        return px > left + margin
+    if direction == "right":
+        return px < right - margin
+    return False
+
+
 # ============================================================
 #  兩平台輪流清怪（純函式，方便測試；小地圖座標系）
 #

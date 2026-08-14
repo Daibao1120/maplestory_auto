@@ -28,6 +28,67 @@ class Rect:
     height: int
 
 
+class PlayerTracker:
+    """跨圈追蹤小地圖玩家點，過濾「座標亂跳」的誤判（純邏輯，不需 cv2）。
+
+    小地圖上可能同時有多個玩家色色塊（其他黃色標記、閃爍殘影），單看
+    「最大塊」偶爾會抓到別的東西：座標瞬間跳走 → 巡邏／換平台朝錯的方向
+    走 → 掉出平台。策略與 tools/hold_and_wiggle.py 的 edge-guard 相同：
+
+    - 有上次位置：挑「最接近上次位置」的候選；跳超過 max_jump_px（掛機
+      不可能瞬移）就當誤判丟棄，這一圈回報 None（引擎會原地等待）。
+    - 連續 miss／丟棄滿 reacquire_misses 圈：當作真的被移動了（死亡回城、
+      被拉走），改取最大塊重新定位。
+    """
+
+    def __init__(self, max_jump_px=20, reacquire_misses=10):
+        self.max_jump_px = int(max_jump_px)
+        self.reacquire_misses = int(reacquire_misses)
+        self.last = None      # 最近一次確認的玩家座標 (x, y)
+        self.misses = 0       # 連續沒有可信候選的圈數
+
+    def reset(self):
+        """忘掉目前追蹤的位置，下一圈以最大塊重新定位。
+
+        引擎的「靜止看門狗」用：若送了移動鍵但座標多圈完全不動，很可能
+        鎖到靜止的黃色標記（追到後距離永遠 0、永遠贏），reset 是唯一出口。
+        """
+        self.last = None
+        self.misses = 0
+
+    @staticmethod
+    def _largest(candidates):
+        return max(candidates, key=lambda b: b[2])  # 不信任呼叫端的排序
+
+    def update(self, candidates):
+        """candidates: [(x, y, area), ...] → 玩家 (x, y) 或 None。"""
+        if not candidates:
+            self.misses += 1
+            if self.misses >= self.reacquire_misses:
+                self.last = None  # 太久沒看到 → 放棄舊位置，下次重新定位
+            return None
+        if self.last is None:
+            bx, by, _area = self._largest(candidates)
+            self.last = (bx, by)
+            self.misses = 0
+            return self.last
+        lx, ly = self.last
+        bx, by, _area = min(candidates,
+                            key=lambda b: (b[0] - lx) ** 2 + (b[1] - ly) ** 2)
+        if abs(bx - lx) <= self.max_jump_px and abs(by - ly) <= self.max_jump_px:
+            self.last = (bx, by)
+            self.misses = 0
+            return self.last
+        self.misses += 1
+        if self.misses >= self.reacquire_misses:
+            # 連續丟棄太多圈：位置可能真的變了 → 取最大塊重新定位
+            bx, by, _area = self._largest(candidates)
+            self.last = (bx, by)
+            self.misses = 0
+            return self.last
+        return None
+
+
 class MinimapLocator:
     """小地圖定位器。
 

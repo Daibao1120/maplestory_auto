@@ -9,6 +9,7 @@ if ROOT not in sys.path:
 
 from src.commands.combat import (  # noqa: E402
     select_nearest, dominant_side, plan_attack, plan_ranged, decision_to_actions,
+    plan_patrol, approach_is_safe,
     PlatformState, filter_attackable, on_platform, plan_two_platforms,
 )
 
@@ -69,6 +70,54 @@ def test_plan_none_when_no_monsters():
     assert plan_attack((0, 0), [], 10) is None
     assert plan_ranged((0, 0), [], 10) is None
     assert decision_to_actions(None) == []
+
+
+# ============================================================
+#  防掉落：巡邏折返（提前 margin）＋走近邊界保險
+# ============================================================
+
+def test_plan_patrol_holds_when_player_unknown():
+    # 小地圖讀不到玩家 → 不移動（盲走是掉出平台的主因之一）
+    assert plan_patrol(None, "right", 30, 48) == (None, False)
+
+
+def test_plan_patrol_turns_before_edge_with_margin():
+    # margin=2：在 46（=48-2）就該折返，而不是貼著 48 才折返
+    assert plan_patrol(46, "right", 30, 48, margin=2) == ("left", True)
+    assert plan_patrol(32, "left", 30, 48, margin=2) == ("right", True)
+    # 中間維持原方向
+    assert plan_patrol(40, "right", 30, 48, margin=2) == ("right", False)
+    assert plan_patrol(40, "left", 30, 48, margin=2) == ("left", False)
+
+
+def test_plan_patrol_turns_back_when_already_outside():
+    # 已經走過頭（在邊界外）→ 往回走
+    assert plan_patrol(50, "right", 30, 48, margin=2) == ("left", True)
+    assert plan_patrol(28, "left", 30, 48, margin=2) == ("right", True)
+
+
+def test_approach_is_safe_blocks_at_boundary():
+    # 在邊界安全區內 → 可走；到了邊界（含 margin）→ 不可再往外走
+    assert approach_is_safe(40, "right", 30, 48, margin=2) is True
+    assert approach_is_safe(46, "right", 30, 48, margin=2) is False
+    assert approach_is_safe(50, "right", 30, 48, margin=2) is False
+    assert approach_is_safe(40, "left", 30, 48, margin=2) is True
+    assert approach_is_safe(32, "left", 30, 48, margin=2) is False
+    # 讀不到位置一律不安全
+    assert approach_is_safe(None, "right", 30, 48) is False
+
+
+def test_patrol_margin_clamped_on_narrow_platform():
+    # margin 超過半個平台寬時，左右門檻會交叉、右緣保護失效（左界檢查先成立
+    # 會一路往右走出平台）→ 必須自動夾到半寬以內
+    # 平台 [30,34]、margin 3 → 有效 margin 2，門檻 32/32
+    assert plan_patrol(33, "right", 30, 34, margin=3) == ("left", True)
+    assert plan_patrol(31, "left", 30, 34, margin=3) == ("right", True)
+    # 極端：margin 大於平台寬也不能在右緣還往右走
+    assert plan_patrol(103, "right", 100, 103, margin=5) == ("left", True)
+    # approach 同步夾住：右緣不可再往外
+    assert approach_is_safe(33, "right", 30, 34, margin=3) is False
+    assert approach_is_safe(31, "right", 30, 34, margin=3) is True
 
 
 # ============================================================

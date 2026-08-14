@@ -51,6 +51,11 @@ vision:
     player_color_lower: [24, 150, 150]
     player_color_upper: [42, 255, 255]
     min_blob_area: 2                 # 小於此面積(px)的色塊視為雜訊忽略
+    # 防掉落：玩家點跨圈追蹤（過濾其他黃色標記造成的座標亂跳——
+    # 亂讀一次座標，巡邏就可能朝錯方向走出平台）
+    max_jump_px: 20                  # 相鄰兩圈玩家點最多移動這麼多小地圖 px，超過視為誤判丟棄
+    reacquire_misses: 10             # 連續讀不到/丟棄滿 N 圈 → 當作真的被移動，重新定位
+    stall_reset_loops: 8             # 有送移動鍵但座標連續 N 圈完全不動 → 追蹤點可能鎖錯，重新定位
     # 其他玩家的橘點顏色（供判斷是否有人佔點）★可再校準
     other_color_lower: [10, 150, 150]
     other_color_upper: [20, 255, 255]
@@ -96,6 +101,19 @@ combat:
   patrol_left_x: 40
   patrol_right_x: 175
   patrol_step_seconds: 0.35
+  # 防掉落：折返點往內縮的安全邊界（小地圖 px）。感知→送鍵有延遲、一步會走
+  # 過頭，貼著邊界才折返可能已經掉下去。平台越窄可設越小（最小 0）。
+  patrol_edge_margin: 2
+  # 防攻擊失效：定點站著打 ~60 秒攻擊會失效 → 每隔 45~65 秒（隨機）小步移動
+  # 一下（往平台中心挪、絕不往邊界外），並讓那一輪換邊打。
+  # reposition_min_seconds 設 0 可整個關閉。
+  reposition_min_seconds: 45
+  reposition_max_seconds: 65
+  reposition_step_seconds: 0.12   # 每次挪動按住方向鍵的秒數（越小步伐越小）
+  reposition_swap_facing: true    # 挪動的那一輪順便換邊打（下一圈自動轉回怪多的那側）
+  # 攻擊前轉向的按鍵時間（秒）。必須極短（只轉身、不走路）；按太久每圈都會
+  # 往怪那側滑一小步，貼邊打怪時會慢慢滑出平台。
+  turn_tap_seconds: 0.03
   player_screen_anchor: null   # 角色在畫面中的位置 [x,y]；null = 畫面中央
 
   # 同高度帶過濾 [lo, hi]：只打「怪中心y − 角色y」落在此範圍的怪。

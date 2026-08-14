@@ -158,10 +158,12 @@ python -m src.main --config config\settings.yaml
 3. **HSV 顏色**：若小地圖黃點抓不到、或血條讀值不準，微調對應的 `*_color_lower/upper`（OpenCV 的 H 是 0–179）。
 4. **怪物模板**：把鱷魚截圖放到 `assets/templates/monsters/`（多補不同動作/方向更準），需要時調 `vision.monster.match_threshold`（真實場景常用 0.55~0.70）。
 5. **巡邏邊界**：在遊戲裡走到平台左右端，看小地圖玩家 x 值，填 `combat.patrol_left_x / patrol_right_x`（設在水邊之前，避免掉下去）。
+6. **防掉落參數**（左右移動掉出平台時調這裡）：`combat.patrol_edge_margin` 折返點往內縮的安全邊界（平台越窄設越小）；`combat.turn_tap_seconds` 攻擊前轉向的極短按時間（按太久會邊轉邊走、貼邊打怪慢慢滑出去）；`vision.minimap.max_jump_px / reacquire_misses / stall_reset_loops` 玩家點跨圈追蹤（過濾小地圖上其他黃色標記造成的座標亂跳、鎖錯點時自動重定位）。
+7. **防攻擊失效**：定點站著打約 60 秒攻擊會失效，`combat.reposition_*` 控制「每 45~65 秒小步移動一下（往平台中心挪、絕不出邊界）＋那一輪換邊打」；`reposition_min_seconds: 0` 可關閉。
 
 ## 開發狀態
 
-**已實作並用合成影像＋真實截圖驗證**：小地圖玩家定位、HP/MP 讀值、鱷魚多模板偵測＋NMS、弓箭手攻擊決策、**兩平台輪流清怪（同高度帶過濾＋跳上平台＋防卡死）**、平台巡邏、整條 dry-run 感知→決策。**仍為 TODO**：`windows-capture` 後端、以 ctypes 定位遊戲視窗、rune 解謎的箭頭辨識。詳見各模組 docstring。
+**已實作並用合成影像＋真實截圖驗證**：小地圖玩家定位、HP/MP 讀值、鱷魚多模板偵測＋NMS、弓箭手攻擊決策、**兩平台輪流清怪（同高度帶過濾＋跳上平台＋防卡死）**、平台巡邏、**防掉落（巡邏提前折返＋讀不到位置不盲走＋追怪邊界保險＋小地圖玩家點跨圈追蹤去誤判）**、整條 dry-run 感知→決策。**仍為 TODO**：`windows-capture` 後端、以 ctypes 定位遊戲視窗、rune 解謎的箭頭辨識。詳見各模組 docstring。
 
 ---
 

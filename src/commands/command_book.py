@@ -65,12 +65,16 @@ class AttackCommand(Command):
         keys = ctx.config.get("keys", {})
         facing = self.args.get("facing", "right")
         repeat = int(self.args.get("repeat", 1))
+        combat_cfg = ctx.config.get("combat", {})
         # 攻擊技能鍵：優先用 combat.attack_key（弓箭手放箭），否則退回 keys.attack
-        attack_key = ctx.config.get("combat", {}).get("attack_key") or keys.get("attack", "ctrl")
-        # 先轉向面對怪物，再放技能連射
+        attack_key = combat_cfg.get("attack_key") or keys.get("attack", "ctrl")
+        # 面向已對就完全不按方向鍵——重複按會累積往怪那側的位移，貼邊打怪
+        # 會慢慢滑出平台。需要轉向時也只「極短按」（只轉身、不走路）。
         turn_key = keys.get("move_left" if facing == "left" else "move_right")
-        if turn_key:
-            ctx.controller.tap(turn_key)
+        if turn_key and ctx.state.get("facing") != facing:
+            ctx.controller.tap(turn_key,
+                               duration=float(combat_cfg.get("turn_tap_seconds", 0.03)))
+        ctx.state["facing"] = facing
         for _ in range(repeat):
             ctx.controller.tap(attack_key)
 
@@ -119,6 +123,7 @@ class ApproachCommand(Command):
         key = keys.get("move_left" if direction == "left" else "move_right")
         if key:
             ctx.controller.hold(key, float(self.args.get("seconds", 0.2)))
+            ctx.state["facing"] = direction  # 走路會轉向，記下來給攻擊指令用
 
 
 class JumpMoveCommand(Command):
@@ -144,6 +149,7 @@ class JumpMoveCommand(Command):
         finally:
             if dir_key:
                 ctx.controller.key_up(dir_key)
+                ctx.state["facing"] = direction  # 跳躍帶位移也會轉向
 
 
 COMMAND_REGISTRY: Dict[str, Type[Command]] = {

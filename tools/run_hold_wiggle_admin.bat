@@ -3,16 +3,42 @@ REM Launch hold_and_wiggle as Administrator so injected keys reach the game.
 REM The game runs elevated; without admin, Windows (UIPI) silently drops our keys.
 REM Double-click this file, accept the UAC prompt.
 
-net session >nul 2>&1
+REM Admin probe: fltmc needs admin but NOT the LanmanServer service ("net session"
+REM fails on machines with the Server service disabled even when elevated, which
+REM would make this script relaunch itself forever).
+fltmc >nul 2>&1
 if %errorlevel% neq 0 (
     echo Requesting administrator privileges...
-    powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+    powershell -Command "Start-Process -FilePath \"%~f0\" -Verb RunAs"
     exit /b
 )
 
-cd /d "D:\indexasia_David\maplestory-classic-bot"
+REM Repo root = parent folder of this tools\ directory (no hard-coded paths,
+REM works from wherever the repo was cloned/unzipped). pushd also maps UNC
+REM paths to a temp drive letter (cmd cannot cd to \\server\share directly).
+pushd "%~dp0.." || (
+    echo [ERROR] Cannot enter the repo folder. Run from a local or mapped drive.
+    pause
+    exit /b 1
+)
 set PYTHONIOENCODING=utf-8
 set PYTHONUNBUFFERED=1
+
+REM ---- Pick a Python 3.8+: project .venv first, then the py launcher, then PATH.
+set "PYCMD="
+if exist ".venv\Scripts\python.exe" set "PYCMD=.venv\Scripts\python.exe"
+if not defined PYCMD for %%V in (3.13 3.12 3.11 3.10 3.9 3.8) do call :probe %%V
+if not defined PYCMD (
+    python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)" >nul 2>&1
+    if not errorlevel 1 set "PYCMD=python"
+)
+if not defined PYCMD (
+    echo [ERROR] No Python 3.8+ found. Install Python 3.10+ or create the project
+    echo         venv first:  python -m venv .venv ^&^& .venv\Scripts\pip install -r requirements.txt
+    pause
+    exit /b 1
+)
+echo Using Python: %PYCMD%
 
 REM Edit the arguments below to taste:
 REM   --key ctrl              attack key, tapped repeatedly (default ctrl)
@@ -41,8 +67,15 @@ REM                           or send any keys into your window. Click back on
 REM                           MapleStory and it auto-resumes. REMOVE this flag if
 REM                           you instead want it to grab focus back on popups.
 REM   --no-move               add this to NOT move at all, just keep attacking
-"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.10 --edge-guard --edge-margin 6 --face left --interval-min 35 --interval-max 50 --no-refocus
+%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.10 --edge-guard --edge-margin 6 --face left --interval-min 35 --interval-max 50 --no-refocus
 
 echo.
 echo Finished. Press any key to close.
 pause >nul
+exit /b
+
+:probe
+if defined PYCMD exit /b
+py -%1 -c "" >nul 2>&1
+if not errorlevel 1 set "PYCMD=py -%1"
+exit /b
