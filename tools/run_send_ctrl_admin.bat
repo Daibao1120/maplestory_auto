@@ -24,6 +24,13 @@ pushd "%~dp0.." || (
 set PYTHONIOENCODING=utf-8
 set PYTHONUNBUFFERED=1
 
+REM ---- Park this console as a tall strip on the RIGHT of the game window ----
+REM GAME_WIDTH = width of your MapleStory window in physical pixels; the strip
+REM uses whatever screen width is left (min 400 px, full screen height), so no
+REM manual resizing every launch. Adjust GAME_WIDTH if you resize the game.
+set GAME_WIDTH=2732
+powershell -NoProfile -Command "$d='[DllImport(\"user32.dll\")]public static extern bool SetProcessDPIAware();[DllImport(\"kernel32.dll\")]public static extern System.IntPtr GetConsoleWindow();[DllImport(\"user32.dll\")]public static extern bool MoveWindow(System.IntPtr h,int x,int y,int w,int ht,bool r);[DllImport(\"user32.dll\")]public static extern int GetSystemMetrics(int i);';$W=Add-Type -MemberDefinition $d -Name Win -Namespace P -PassThru;[P.Win]::SetProcessDPIAware()|Out-Null;$sw=[P.Win]::GetSystemMetrics(0);$sh=[P.Win]::GetSystemMetrics(1);$w=[Math]::Max(400,$sw-%GAME_WIDTH%);[P.Win]::MoveWindow([P.Win]::GetConsoleWindow(),$sw-$w,0,$w,$sh,$true)|Out-Null"
+
 REM ---- Pick a Python 3.8+: project .venv first, then the py launcher, then PATH.
 set "PYCMD="
 if exist ".venv\Scripts\python.exe" set "PYCMD=.venv\Scripts\python.exe"
