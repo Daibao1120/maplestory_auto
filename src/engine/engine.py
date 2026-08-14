@@ -88,7 +88,7 @@ class BotEngine:
         # 防攻擊失效：定點站著打 ~60 秒攻擊會失效，需定時小步移動＋換邊打
         self._repo_min = 45.0
         self._repo_max = 65.0
-        self._repo_step = 0.12
+        self._repo_step = 0.2
         self._repo_swap = True
         self._next_reposition_ts = 0.0
         self._repo_alt = True  # 讀不到位置時左右極小交替用
@@ -138,7 +138,8 @@ class BotEngine:
         # reposition_min_seconds 設 0 可整個關閉。
         self._repo_min = float(combat.get("reposition_min_seconds", 45))
         self._repo_max = max(float(combat.get("reposition_max_seconds", 65)), self._repo_min)
-        self._repo_step = float(combat.get("reposition_step_seconds", 0.12))
+        # 按住須明顯超過 0.1 秒才會真的走路（≲0.1 只轉身），太小等於沒動
+        self._repo_step = float(combat.get("reposition_step_seconds", 0.2))
         self._repo_swap = bool(combat.get("reposition_swap_facing", True))
         self._platforms = list(combat.get("platforms") or [])
         self._switch_cfg = combat.get("platform_switch") or {}

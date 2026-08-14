@@ -109,7 +109,7 @@ combat:
   # reposition_min_seconds 設 0 可整個關閉。
   reposition_min_seconds: 45
   reposition_max_seconds: 65
-  reposition_step_seconds: 0.12   # 每次挪動按住方向鍵的秒數（越小步伐越小）
+  reposition_step_seconds: 0.2    # 每次挪動按住方向鍵的秒數；≲0.1 只會轉身不走路（等於沒動）
   reposition_swap_facing: true    # 挪動的那一輪順便換邊打（下一圈自動轉回怪多的那側）
   # 攻擊前轉向的按鍵時間（秒）。必須極短（只轉身、不走路）；按太久每圈都會
   # 往怪那側滑一小步，貼邊打怪時會慢慢滑出平台。
