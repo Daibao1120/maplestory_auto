@@ -310,7 +310,10 @@ def test_dispel_buff_right_clicks_detected_icon():
 
 
 def test_dispel_buff_silent_without_templates():
-    eng = make_engine()               # 真 detector、資料夾沒有模板
+    # 沒有任何 buff 模板 → 直接靜默返回（不依賴本機資料夾內容）
+    eng = make_engine()
+    eng.buff_detector = StubBuffDetector([])
+    eng.buff_detector.template_names = []
     eng._next_buff_check = 0.0
     eng._dispel_buffs(object())
     assert eng.controller.right_clicks == []

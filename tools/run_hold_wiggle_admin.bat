@@ -61,10 +61,14 @@ REM   --edge-margin 6         safe range = start x +/- this many minimap pixels.
 REM                           SMALLER for a narrower platform.
 REM   --patrol-steps 1        blind fallback only (used when --edge-guard is off /
 REM                           unavailable): steps to one side before turning back.
-REM   --face left             starting attack direction ASSUMPTION. It does NOT
-REM                           force-turn at launch (keeps your character's current
-REM                           facing). When you manually switch sides in-game
-REM                           (arrow to pause, turn, Ctrl to resume) it follows you.
+REM   --face left             STARTING attack side assumption. Each patrol step
+REM                           now SWITCHES the attack side and keeps attacking
+REM                           that side until the next step (~45-55s per side) --
+REM                           standing-still attacks go stale unless you both
+REM                           move a little AND actually change sides. Add
+REM                           --fixed-face to keep one side, or --swap-every 2
+REM                           to switch every 2nd step. Manual side switching
+REM                           (arrow to pause, turn, Ctrl to resume) still works.
 REM   --interval-min 40       shortest gap between patrol steps (seconds).
 REM   --interval-max 55       Attacks go stale after ~60s standing still, so it
 REM                           repositions once before that. No need to move often.

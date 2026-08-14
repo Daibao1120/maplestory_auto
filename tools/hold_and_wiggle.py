@@ -182,7 +182,8 @@ class HoldWiggle:
                  attack_facing="left", enable_move=True, refocus=True,
                  jump_in_place=False, jump_key="alt",
                  edge_guard=False, edge_margin=6,
-                 dispel_buff=False, dispel_interval=5.0, dry_run=False):
+                 dispel_buff=False, dispel_interval=5.0,
+                 alternate_face=True, swap_every=1, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
@@ -197,6 +198,11 @@ class HoldWiggle:
         self.edge_margin = int(edge_margin)         # 安全界：起始 x ± 這麼多小地圖 px
         self.dispel_buff = dispel_buff              # True = 偵測「要點掉的 buff」（如速度激發）並右鍵移除
         self.dispel_interval = float(dispel_interval)
+        # 防攻擊失效的關鍵是「真的換邊打」：挪步後朝新的一側持續輸出到下一次
+        # 挪步（不是轉一下又轉回來——那樣位置抖了但攻擊模式沒變，防不了失效）。
+        self.alternate_face = alternate_face        # True = 每 swap_every 次挪步換一次攻擊方向
+        self.swap_every = max(1, int(swap_every))
+        self._cycle_count = 0
         self._tm = None                             # TemplateMatcher（延遲建立）
         self._dispel_roi = None                     # buff 列 ROI；None = 右上角自動推算
         self._dispel_last = 0.0
@@ -238,8 +244,8 @@ class HoldWiggle:
 
     def _tap(self, key, hold=None):
         self._down(key)
-        # 按住時間帶隨機（人不會每次都按一樣久）
-        time.sleep(hold if hold is not None else random.uniform(0.04, 0.10))
+        # 按住時間帶隨機（人不會每次都按一樣久）；夾住下限避免負值
+        time.sleep(max(0.0, hold if hold is not None else random.uniform(0.04, 0.10)))
         self._up(key)
 
     def _attack_once(self):
@@ -247,9 +253,33 @@ class HoldWiggle:
         不管遊戲是『按一下打一下』還是『按住連打』都吃得到，移動後也能無縫接回。"""
         self._tap(self.attack_key, hold=random.uniform(0.04, 0.09))
 
-    def _reface(self):
-        """把面向轉回固定攻擊方向（極短按，只轉身不走路），這樣攻擊永遠朝同一邊。"""
-        self._tap(self.attack_facing, hold=0.03)
+    def _reface(self, face=None):
+        """把面向定到指定方向（極短按，只轉身不走路）。未指定 = 目前攻擊方向。"""
+        self._tap(face or self.attack_facing, hold=0.03)
+
+    def _next_face(self):
+        """這一次挪步後要朝哪一邊打。
+
+        防攻擊失效不能只靠位移：實測有效的人工節奏是「移動一下＋換邊打」，
+        所以每 swap_every 次挪步就真的換邊，並持續朝那一邊打到下一次挪步。
+        """
+        self._cycle_count += 1
+        if self.alternate_face and self._cycle_count % self.swap_every == 0:
+            return "left" if self.attack_facing == "right" else "right"
+        return self.attack_facing
+
+    def _set_face_after_step(self, facing_now, target_face):
+        """挪步結束後把面向定到 target_face；回傳給訊息用的後綴字串。
+
+        facing_now：這一步結束時角色實際面對的方向（走路會轉向；原地跳不變）。
+        """
+        swapped = target_face != self.attack_facing
+        if facing_now != target_face:
+            self._reface(target_face)
+        self.attack_facing = target_face
+        if swapped:
+            return f"，換邊改朝{'左' if target_face == 'left' else '右'}打"
+        return f"，續朝{'左' if target_face == 'left' else '右'}打"
 
     # ---- edge-guard：用小地圖真實 x 判斷邊界 ----
     @staticmethod
@@ -404,14 +434,16 @@ class HoldWiggle:
         """
         if not self.enable_move:
             return
+        target = self._next_face()   # 這一輪之後要朝哪邊打（防失效的「換邊」在這裡）
         if self.jump_in_place:
             # 原地跳：直上直下、水平不位移 → 平台再小也掉不出去（前提是跳也算移動）
             self._tap(self.jump_key, hold=random.uniform(0.04, 0.08))
-            print("  ↻ 原地跳一下（不位移、掉不出平台）→ 接回攻擊")
+            note = self._set_face_after_step(self.attack_facing, target)
+            print(f"  ↻ 原地跳一下（不位移、掉不出平台）{note} → 接回攻擊")
             time.sleep(random.uniform(0.1, 0.2))
             return
         if self.edge_guard:
-            self._move_edge_guarded()
+            self._move_edge_guarded(target)
             return
         direction = "right" if self._patrol_dir > 0 else "left"
         t = self.move_time
@@ -422,22 +454,19 @@ class HoldWiggle:
             self._patrol_dir = -1
         elif self._patrol_pos <= -self.patrol_steps:
             self._patrol_dir = 1
-        # 若剛剛走的方向跟固定攻擊方向相反，面向被帶偏了 → 轉回來，攻擊才不會射錯邊
-        refaced = ""
-        if direction != self.attack_facing:
-            self._reface()
-            refaced = f"，轉回{'左' if self.attack_facing == 'left' else '右'}攻擊"
+        note = self._set_face_after_step(direction, target)
         arrow = "→右" if direction == "right" else "←左"
-        print(f"  ↻ 巡邏挪一步 {arrow}（位置 {self._patrol_pos:+d}/±{self.patrol_steps}）{refaced} → 接回攻擊")
+        print(f"  ↻ 巡邏挪一步 {arrow}（位置 {self._patrol_pos:+d}/±{self.patrol_steps}）{note} → 接回攻擊")
         time.sleep(random.uniform(0.05, 0.12))
 
-    def _move_edge_guarded(self):
+    def _move_edge_guarded(self, target_face):
         """往起始中心回歸（不走去邊界）——小平台最安全的移動。
 
         - 偏離中心 → 往中心那側走一步（把自己拉回來，永遠不往外走）。
         - 已在中心（±1px）→ 只做一步極小交替，位置變一下夠重置定點失效即可。
         - 抓不到當下 x → 用最近已知 x 判斷（掛機站著不動，位置幾乎沒變），照樣移動不定在原地。
         - 完全沒讀到過 → 保守極小交替一步。
+        挪完把面向定到 target_face（換邊打），持續到下一次挪步。
         """
         x = self._player_x()
         if x is not None:
@@ -449,9 +478,8 @@ class HoldWiggle:
             direction = "right" if self._patrol_dir > 0 else "left"
             self._patrol_dir *= -1
             self._tap(direction, hold=min(self.move_time, 0.1))
-            if direction != self.attack_facing:
-                self._reface()
-            print("  ↻ 回中巡邏（抓不到玩家點，保守極小交替）→ 接回攻擊")
+            note = self._set_face_after_step(direction, target_face)
+            print(f"  ↻ 回中巡邏（抓不到玩家點，保守極小交替）{note} → 接回攻擊")
             time.sleep(random.uniform(0.05, 0.12))
             return
 
@@ -463,11 +491,10 @@ class HoldWiggle:
             direction = "right" if self._patrol_dir > 0 else "left"
             self._patrol_dir *= -1       # 已在中心：極小交替一步
         self._tap(direction, hold=self.move_time + random.uniform(-0.01, 0.01))
-        if direction != self.attack_facing:
-            self._reface()
+        note = self._set_face_after_step(direction, target_face)
         arrow = "→右" if direction == "right" else "←左"
         src = f"x={x}" if x is not None else f"x≈{ref}(最近已知)"
-        print(f"  ↻ 回中巡邏 {arrow}（{src} 中心={c}）→ 接回攻擊")
+        print(f"  ↻ 回中巡邏 {arrow}（{src} 中心={c}）{note} → 接回攻擊")
         time.sleep(random.uniform(0.05, 0.12))
 
     def run(self, window_keyword):
@@ -508,12 +535,15 @@ class HoldWiggle:
                 print(f"[警告] dispel-buff 初始化失敗（缺 opencv/mss？{e}）→ 停用")
                 self.dispel_buff = False
 
+        swap_desc = ("挪步後換邊打" if self.alternate_face and self.swap_every == 1 else
+                     f"每 {self.swap_every} 次挪步換邊打" if self.alternate_face else
+                     "固定單邊打")
         if self.edge_guard:
             move_desc = (f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏，"
-                         f"用小地圖真實 x 到邊界折返（不會走出平台）")
+                         f"用小地圖真實 x 到邊界折返（不會走出平台），{swap_desc}")
         else:
             move_desc = "不移動" if not self.enable_move else \
-                f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，移動後轉回攻擊方向）"
+                f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，{swap_desc}）"
         print("=" * 56)
         print(f" 連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
         print(f" 接手換邊=方向鍵暫停→轉向→Ctrl恢復 | 結束=F12")
@@ -675,6 +705,11 @@ def parse_args(argv=None):
                         "掉出平台）並自動右鍵移除；圖示截圖放 assets/templates/buffs/，需 opencv/mss")
     p.add_argument("--dispel-interval", type=float, default=5.0,
                    help="dispel-buff 檢查間隔秒數（預設 5）")
+    p.add_argument("--fixed-face", action="store_true",
+                   help="固定朝同一邊打、不換邊（預設是每次挪步後換邊打——"
+                        "定點防失效光位移不夠，要真的換邊；此旗標恢復舊行為）")
+    p.add_argument("--swap-every", type=int, default=1,
+                   help="每幾次挪步換一次邊（預設 1 = 每次都換；配合 interval 約 45~55 秒換一邊）")
     p.add_argument("--jump-in-place", action="store_true",
                    help="改用『原地跳』重定位（直上直下不位移，小平台不會掉下去）")
     p.add_argument("--jump-key", default="alt", choices=sorted(_SCAN),
@@ -703,7 +738,9 @@ def main(argv=None):
                     refocus=not args.no_refocus, jump_in_place=args.jump_in_place,
                     jump_key=args.jump_key, edge_guard=args.edge_guard,
                     edge_margin=args.edge_margin, dispel_buff=args.dispel_buff,
-                    dispel_interval=args.dispel_interval, dry_run=args.dry_run)
+                    dispel_interval=args.dispel_interval,
+                    alternate_face=not args.fixed_face, swap_every=args.swap_every,
+                    dry_run=args.dry_run)
     return hw.run(args.window)
 
 
