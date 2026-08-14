@@ -158,7 +158,7 @@ class HoldWiggle:
     QUIT_KEY = "f12"
     POLL = 0.03  # 秒；輪詢間隔
 
-    def __init__(self, attack_key="ctrl", interval_min=40.0, interval_max=55.0,
+    def __init__(self, attack_key="ctrl", interval_min=35.0, interval_max=50.0,
                  move_time=0.18, attack_interval=0.22, patrol_steps=2,
                  attack_facing="left", enable_move=True, refocus=True,
                  jump_in_place=False, jump_key="alt",
@@ -179,6 +179,8 @@ class HoldWiggle:
         self._mmloc = None                          # MinimapLocator
         self._edge_lo = None
         self._edge_hi = None
+        self._last_x = None                         # 最近一次成功讀到的玩家 x（抓不到時的後備）
+        self.max_jump = max(25, self.edge_margin * 4)  # x 一次跳超過這麼多 px 視為誤判、丟棄
         self.refocus = refocus                      # 焦點被搶走時自動切回楓之谷
         self.dry_run = dry_run
         self._hwnd = None
@@ -239,14 +241,31 @@ class HoldWiggle:
         self._cap = ScreenCapture(backend="mss", window_title=self._window_keyword)
         self._mmloc = MinimapLocator(cfg["vision"]["minimap"])
 
-    def _player_x(self):
-        """讀目前玩家在小地圖上的 x；抓不到回 None（只讀畫面，不送鍵、不搶焦點）。"""
-        try:
-            frame = self._cap.grab()
-            p = self._mmloc.locate_player(frame)
-            return int(p[0]) if p else None
-        except Exception:
-            return None
+    def _player_x(self, retries=5, gap=0.12, fresh=False):
+        """讀玩家在小地圖上的 x（只讀畫面，不送鍵、不搶焦點）。抓不到回 None。
+
+        小地圖玩家點會閃爍、又常有別的黃色標記混淆，所以：
+        - 連抓多張（跨過閃爍週期）。
+        - 有上次已知 x 且非 fresh：挑「最接近上次 x」的塊；若最近的都跳超過
+          max_jump（掛機不可能瞬移）→ 判定誤判、不採用（避免像 x=59 那種亂讀害你掉平台）。
+        - fresh=True 或沒有上次位置：取最大塊（第一次定位 / 手動換點後重新定位用）。
+        """
+        for i in range(max(1, retries)):
+            try:
+                frame = self._cap.grab()
+                cands = self._mmloc.locate_player_candidates(frame)
+            except Exception:
+                cands = []
+            if cands:
+                if fresh or self._last_x is None:
+                    return cands[0][0]                       # 最大塊
+                best = min(cands, key=lambda b: abs(b[0] - self._last_x))
+                if abs(best[0] - self._last_x) <= self.max_jump:
+                    return best[0]
+                # 最接近的都跳太遠 → 這張可能是誤判/雜訊，再抓一張
+            if i < retries - 1:
+                time.sleep(gap)
+        return None
 
     def _user_intervened(self):
         """使用者是否按著方向鍵（攻擊鍵是我們自己在點，不算介入）。"""
@@ -323,23 +342,39 @@ class HoldWiggle:
         time.sleep(random.uniform(0.05, 0.12))
 
     def _move_edge_guarded(self):
-        """用小地圖真實 x 決定方向：到安全界就折返，抓不到玩家點就保守不移動。"""
+        """用小地圖真實 x 決定方向、到安全界折返。
+
+        抓不到當下 x 時**不再定在原地**（那會造成攻擊失效）：改用「最近一次已知 x」
+        判斷方向照樣移動——掛機時你站著不動，上次位置幾乎就是現在位置，安全。
+        真的從頭到尾沒讀到過才退成保守左右交替小步。
+        """
         x = self._player_x()
-        if x is None:
-            print("  ⚠ edge-guard 這次抓不到小地圖玩家點 → 保守起見不移動")
+        if x is not None:
+            self._last_x = x
+        ref = x if x is not None else self._last_x
+
+        if ref is None:
+            # 完全沒讀到過位置 → 保守：左右交替一小步（不累積漂移），至少讓角色動一下
+            direction = "right" if self._patrol_dir > 0 else "left"
+            self._patrol_dir *= -1
+            self._tap(direction, hold=min(self.move_time, 0.12))
+            if direction != self.attack_facing:
+                self._reface()
+            print(f"  ↻ 邊界巡邏（抓不到玩家點，保守交替小步 {'→右' if direction == 'right' else '←左'}）→ 接回攻擊")
+            time.sleep(random.uniform(0.05, 0.12))
             return
-        if x <= self._edge_lo:
+
+        if ref <= self._edge_lo:
             self._patrol_dir = 1        # 太左 → 往右
-        elif x >= self._edge_hi:
+        elif ref >= self._edge_hi:
             self._patrol_dir = -1       # 太右 → 往左
         direction = "right" if self._patrol_dir > 0 else "left"
         self._tap(direction, hold=self.move_time + random.uniform(-0.01, 0.01))
-        refaced = ""
         if direction != self.attack_facing:
             self._reface()
-            refaced = f"，轉回{'左' if self.attack_facing == 'left' else '右'}攻擊"
         arrow = "→右" if direction == "right" else "←左"
-        print(f"  ↻ 邊界巡邏 {arrow}（x={x} 安全界[{self._edge_lo}~{self._edge_hi}]）{refaced} → 接回攻擊")
+        src = f"x={x}" if x is not None else f"x≈{ref}(最近已知)"
+        print(f"  ↻ 邊界巡邏 {arrow}（{src} 安全界[{self._edge_lo}~{self._edge_hi}]）→ 接回攻擊")
         time.sleep(random.uniform(0.05, 0.12))
 
     def run(self, window_keyword):
@@ -361,16 +396,12 @@ class HoldWiggle:
                 print(f"[警告] edge-guard 初始化失敗（缺 opencv/mss？{e}）→ 改用一般巡邏")
                 self.edge_guard = False
             if self.edge_guard:
-                sx = None
-                for _ in range(10):
-                    sx = self._player_x()
-                    if sx is not None:
-                        break
-                    time.sleep(0.2)
+                sx = self._player_x(retries=12, gap=0.15, fresh=True)
                 if sx is None:
                     print("[警告] edge-guard 抓不到小地圖玩家點 → 改用一般巡邏（請確認遊戲在前景、小地圖有開）")
                     self.edge_guard = False
                 else:
+                    self._last_x = sx
                     self._edge_lo = sx - self.edge_margin
                     self._edge_hi = sx + self.edge_margin
                     print(f"  ✓ edge-guard 啟用：起始 x={sx}，安全界[{self._edge_lo}~{self._edge_hi}]（±{self.edge_margin}px）")
@@ -476,6 +507,14 @@ class HoldWiggle:
                         if self._pending_face:       # 採用你手動換到的方向
                             self.attack_facing = self._pending_face
                             self._pending_face = None
+                        # 你手動接手可能把角色走到新位置 → edge-guard 以新位置重設安全界
+                        if self.edge_guard and not self.dry_run:
+                            nx = self._player_x(retries=8, gap=0.15, fresh=True)
+                            if nx is not None:
+                                self._last_x = nx
+                                self._edge_lo = nx - self.edge_margin
+                                self._edge_hi = nx + self.edge_margin
+                                print(f"    edge-guard 重新定位：中心 x={nx}，安全界[{self._edge_lo}~{self._edge_hi}]")
                         state = "RUNNING"
                         cycle_start = time.time()
                         wait = self._next_interval()
@@ -508,10 +547,10 @@ def parse_args(argv=None):
                    help="攻擊鍵（預設 ctrl）；會被連續點擊")
     p.add_argument("--attack-interval", type=float, default=0.22,
                    help="兩次攻擊點擊的間隔秒數（預設 0.22，越小打越快）")
-    p.add_argument("--interval-min", type=float, default=40.0,
-                   help="兩次巡邏移動之間最短秒數（預設 40）；定點約 60 秒攻擊才會失效，故不用太頻繁")
-    p.add_argument("--interval-max", type=float, default=55.0,
-                   help="兩次巡邏移動之間最長秒數（預設 55，留在 60 秒失效前）；實際每次在 min~max 隨機")
+    p.add_argument("--interval-min", type=float, default=35.0,
+                   help="兩次巡邏移動之間最短秒數（預設 35）；定點約 60 秒攻擊才會失效，故不用太頻繁")
+    p.add_argument("--interval-max", type=float, default=50.0,
+                   help="兩次巡邏移動之間最長秒數（預設 50，留在 60 秒失效前的餘裕）；每次在 min~max 隨機")
     p.add_argument("--move-time", type=float, default=0.18,
                    help="每一步按住方向鍵秒數（預設 0.18）；太短(<0.1)角色只會轉身不走路")
     p.add_argument("--patrol-steps", type=int, default=2,

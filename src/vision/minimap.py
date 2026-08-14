@@ -63,6 +63,28 @@ class MinimapLocator:
         mask = self._mask(region, self.player_lower, self.player_upper)
         return self._largest_blob_centroid(mask)
 
+    def locate_player_candidates(self, frame):
+        """回傳所有「玩家色」色塊 [(x, y, area), ...]（小地圖 ROI 座標，面積大到小）。
+
+        小地圖上可能有多個黃色標記（玩家、任務、傳點…），`locate_player` 只回最大塊，
+        有時會挑錯。呼叫端可用這份清單自行挑「最接近上次位置」的塊，並過濾誤判。
+        缺套件 / 找不到回空 list。
+        """
+        if not _CV_AVAILABLE or np is None or frame is None:
+            return []
+        region = self._crop_roi(frame)
+        if region.size == 0:
+            return []
+        mask = self._mask(region, self.player_lower, self.player_upper)
+        num, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        out = []
+        for lbl in range(1, num):  # 跳過背景
+            area = int(stats[lbl, cv2.CC_STAT_AREA])
+            if area >= self.min_blob_area:
+                cx, cy = centroids[lbl]
+                out.append((int(round(cx)), int(round(cy)), area))
+        return sorted(out, key=lambda b: -b[2])
+
     def locate_others(self, frame):
         """回傳其他玩家標記的概略重心 (x, y)；找不到回傳 None。"""
         if not _CV_AVAILABLE or np is None or frame is None:
