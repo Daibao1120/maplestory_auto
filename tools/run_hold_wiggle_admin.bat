@@ -22,10 +22,13 @@ REM                           character only turns to face and does NOT walk, so
 REM                           it looks like it did not move. Raise this to walk more.
 REM   --patrol-steps 2        how many steps to one side before turning back;
 REM                           SMALLER for a smaller platform (try 1 if you fall off)
+REM   --face left             fixed attack direction; after moving it turns back
+REM                           to this side. Change to  --face right  if you attack
+REM                           to the right.
 REM   --interval-min 5        shortest gap between patrol steps (seconds)
 REM   --interval-max 12       longest gap; each wait is randomized in this range
 REM   --no-move               add this to NOT move at all, just keep attacking
-"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --patrol-steps 2 --interval-min 5 --interval-max 12
+"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --patrol-steps 2 --face left --interval-min 5 --interval-max 12
 
 echo.
 echo Finished. Press any key to close.

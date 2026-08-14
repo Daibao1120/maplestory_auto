@@ -156,13 +156,14 @@ class HoldWiggle:
 
     def __init__(self, attack_key="ctrl", interval_min=5.0, interval_max=12.0,
                  move_time=0.18, attack_interval=0.22, patrol_steps=2,
-                 enable_move=True, refocus=True, dry_run=False):
+                 attack_facing="left", enable_move=True, refocus=True, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
         self.move_time = float(move_time)          # 每步按住方向鍵秒數（越小步伐越小）
         self.attack_interval = float(attack_interval)  # 兩次攻擊點擊的間隔（秒）
         self.patrol_steps = max(1, int(patrol_steps))  # 從中心往單邊最多走幾步就折返
+        self.attack_facing = attack_facing          # 固定攻擊方向（left/right）；移動後轉回這邊
         self.enable_move = enable_move              # False = 完全不移動，只連點攻擊
         self.refocus = refocus                      # 焦點被搶走時自動切回楓之谷
         self.dry_run = dry_run
@@ -199,6 +200,10 @@ class HoldWiggle:
         """點一下攻擊鍵。連續呼叫 = 連續攻擊，比『按住不放』可靠——
         不管遊戲是『按一下打一下』還是『按住連打』都吃得到，移動後也能無縫接回。"""
         self._tap(self.attack_key, hold=random.uniform(0.04, 0.09))
+
+    def _reface(self):
+        """把面向轉回固定攻擊方向（極短按，只轉身不走路），這樣攻擊永遠朝同一邊。"""
+        self._tap(self.attack_facing, hold=0.03)
 
     def _user_intervened(self):
         """使用者是否按著方向鍵（攻擊鍵是我們自己在點，不算介入）。"""
@@ -248,8 +253,13 @@ class HoldWiggle:
             self._patrol_dir = -1
         elif self._patrol_pos <= -self.patrol_steps:
             self._patrol_dir = 1
+        # 若剛剛走的方向跟固定攻擊方向相反，面向被帶偏了 → 轉回來，攻擊才不會射錯邊
+        refaced = ""
+        if direction != self.attack_facing:
+            self._reface()
+            refaced = f"，轉回{'左' if self.attack_facing == 'left' else '右'}攻擊"
         arrow = "→右" if direction == "right" else "←左"
-        print(f"  ↻ 巡邏挪一步 {arrow}（位置 {self._patrol_pos:+d}/±{self.patrol_steps}）→ 接回攻擊")
+        print(f"  ↻ 巡邏挪一步 {arrow}（位置 {self._patrol_pos:+d}/±{self.patrol_steps}）{refaced} → 接回攻擊")
         time.sleep(random.uniform(0.05, 0.12))
 
     def run(self, window_keyword):
@@ -264,9 +274,9 @@ class HoldWiggle:
             return 1
 
         move_desc = "不移動" if not self.enable_move else \
-            f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步）"
+            f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，移動後轉回{'左' if self.attack_facing == 'left' else '右'}）"
         print("=" * 56)
-        print(f" 連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
+        print(f" 連點「{self.attack_key}」攻擊、固定朝【{'左' if self.attack_facing == 'left' else '右'}】（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
         print(f" 介入=方向鍵(暫停) | 恢復=Ctrl | 結束=F12")
         if self.dry_run:
             print(" [dry-run] 只印節奏、不送實體按鍵")
@@ -276,10 +286,12 @@ class HoldWiggle:
         cycle_start = time.time()
         wait = self._next_interval()
         last_attack = 0.0
+        if not self.dry_run:
+            self._reface()  # 開場先面向固定攻擊方向，確保第一批攻擊就朝對的邊
         if self.enable_move:
-            print(f"  開始攻擊；下次移動：{wait:.0f} 秒後")
+            print(f"  開始攻擊（朝{'左' if self.attack_facing == 'left' else '右'}）；下次移動：{wait:.0f} 秒後")
         else:
-            print("  開始攻擊（不移動）")
+            print(f"  開始攻擊（朝{'左' if self.attack_facing == 'left' else '右'}，不移動）")
         try:
             while True:
                 if _pressed(_VK[self.QUIT_KEY]):
@@ -357,6 +369,8 @@ def parse_args(argv=None):
                    help="每一步按住方向鍵秒數（預設 0.18）；太短(<0.1)角色只會轉身不走路")
     p.add_argument("--patrol-steps", type=int, default=2,
                    help="從出發點往單邊最多走幾步就折返（預設 2）；平台越小設越小")
+    p.add_argument("--face", choices=("left", "right"), default="left",
+                   help="固定攻擊方向（預設 left）；巡邏移動後會轉回這一邊再攻擊")
     p.add_argument("--no-move", action="store_true",
                    help="完全不移動，只連點攻擊（只想定點刷攻擊時用）")
     p.add_argument("--no-refocus", action="store_true",
@@ -377,8 +391,8 @@ def main(argv=None):
     hw = HoldWiggle(attack_key=args.key, interval_min=args.interval_min,
                     interval_max=args.interval_max, move_time=args.move_time,
                     attack_interval=args.attack_interval, patrol_steps=args.patrol_steps,
-                    enable_move=not args.no_move, refocus=not args.no_refocus,
-                    dry_run=args.dry_run)
+                    attack_facing=args.face, enable_move=not args.no_move,
+                    refocus=not args.no_refocus, dry_run=args.dry_run)
     return hw.run(args.window)
 
 

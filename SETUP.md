@@ -103,6 +103,8 @@ python tools/send_ctrl_to_maple.py --list
   轉身、不會真的走**，看起來像沒動 → 沒走就把它調大（0.2、0.25…）；走太遠就調小。
 - **`--patrol-steps 2` 巡邏範圍**：往單邊最多走幾步就折返。平台很小 → 設小一點
   （**會掉下平台就調成 1**）。總移動範圍 ≈ move-time × patrol-steps。
+- **`--face left` 固定攻擊方向**：攻擊永遠朝這一邊；巡邏往反方向走完後會**轉回這邊**
+  再攻擊（不會射錯邊）。你朝右打就改 `--face right`。
 - `--interval-min 5 --interval-max 12` 每隔幾秒挪一步（要更常換位就調小）
 - `--no-move` 完全不動只打　`--no-refocus` 焦點被搶走不搶回（只暫停）
 - `--window 新楓之谷` 視窗標題關鍵字（預設就是這個）
