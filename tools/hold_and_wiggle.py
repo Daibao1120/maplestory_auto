@@ -205,7 +205,63 @@ def _right_click_at(sx: int, sy: int) -> None:
 # ============================================================
 #  視窗前景化（送鍵前必須讓遊戲成為前景視窗）
 # ============================================================
+# 標題比對會誤中瀏覽器分頁（Chrome 開著遊戲官網登入頁時，分頁標題就叫
+# 「新楓之谷：經典版」）——對瀏覽器送鍵是危險的誤操作，一律排除。
+_NON_GAME_EXES = {
+    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
+    "iexplore.exe", "explorer.exe", "code.exe", "windowsterminal.exe",
+    "powershell.exe", "cmd.exe", "conhost.exe", "notepad.exe", "python.exe",
+    "pythonw.exe", "claude.exe", "discord.exe", "linefortab.exe", "line.exe",
+}
+
+
+def _window_exe(hwnd) -> str:
+    """回傳視窗所屬行程的執行檔名（小寫）；失敗回空字串。"""
+    pid = wt.DWORD()
+    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return ""
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(520)
+        size = ctypes.c_ulong(520)
+        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return os.path.basename(buf.value).lower()
+    finally:
+        k32.CloseHandle(h)
+    return ""
+
+
+def _window_class(hwnd) -> str:
+    buf = ctypes.create_unicode_buffer(256)
+    _user32.GetClassNameW(hwnd, buf, 256)
+    return buf.value
+
+
+def is_game_window(title: str, exe: str, cls: str, keyword: str,
+                   width: int = 0, height: int = 0) -> bool:
+    """判斷這個視窗是不是「真的遊戲視窗」（純函式，可測試）。
+
+    規則：標題要含關鍵字；執行檔不得是瀏覽器/終端機等（否則就是誤中分頁
+    標題）；視窗尺寸要像遊戲畫面（避免抓到小型工具視窗）。
+    遊戲本體的 window class 通常是 MapleStoryClass，命中即直接採用。
+    """
+    if keyword and keyword not in (title or ""):
+        return False
+    if cls and "maplestory" in cls.lower():
+        return True
+    if (exe or "") in _NON_GAME_EXES:
+        return False
+    if width and height and (width < 640 or height < 480):
+        return False
+    return True
+
+
 def _find_window(keyword: str):
+    """找出真正的遊戲視窗（排除瀏覽器分頁等同名視窗）。"""
     found = []
 
     @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
@@ -217,13 +273,23 @@ def _find_window(keyword: str):
             return True
         buf = ctypes.create_unicode_buffer(n + 1)
         _user32.GetWindowTextW(hwnd, buf, n + 1)
-        if keyword in buf.value:
-            found.append(hwnd)
-            return False
+        title = buf.value
+        if keyword not in title:
+            return True
+        rect = wt.RECT()
+        _user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        w_, h_ = rect.right - rect.left, rect.bottom - rect.top
+        exe, cls = _window_exe(hwnd), _window_class(hwnd)
+        if is_game_window(title, exe, cls, keyword, w_, h_):
+            # class 命中遊戲本體 → 最優先；否則先記著繼續找更好的
+            found.append((0 if "maplestory" in (cls or "").lower() else 1, hwnd))
         return True
 
     _user32.EnumWindows(_cb, 0)
-    return found[0] if found else None
+    if not found:
+        return None
+    found.sort(key=lambda p: p[0])
+    return found[0][1]
 
 
 def _foreground(hwnd) -> bool:
