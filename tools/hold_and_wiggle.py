@@ -32,6 +32,7 @@ import ctypes.wintypes as wt
 import os
 import random
 import sys
+import threading
 import time
 
 # repo 根目錄（本檔在 tools/ 底下）——edge-guard 需要 import src.capture / src.vision
@@ -113,6 +114,55 @@ def _send_key(name: str, keyup: bool) -> None:
 def _pressed(vk: int) -> bool:
     """使用者當下是否按著這個鍵（最高位元 = 現在被按住）。"""
     return bool(_user32.GetAsyncKeyState(vk) & 0x8000)
+
+
+class _PhysicalKeys:
+    """低階鍵盤鉤子執行緒：只追蹤「實體」按鍵狀態（忽略注入事件）。
+
+    GetAsyncKeyState 分不出實體按鍵和我們自己 SendInput 注入的按鍵——
+    誤把使用者按住當卡鍵去強制放開，會讓玩家「動不了」；反過來把我們
+    卡死的注入鍵當成使用者介入，工具會袖手旁觀讓角色走到掉出平台。
+    WH_KEYBOARD_LL 的事件帶 LLKHF_INJECTED 旗標，可精準只記實體鍵。
+    """
+
+    _WM_DOWN = (0x0100, 0x0104)   # WM_KEYDOWN, WM_SYSKEYDOWN
+    _WM_UP = (0x0101, 0x0105)     # WM_KEYUP, WM_SYSKEYUP
+    _LLKHF_INJECTED = 0x10
+
+    def __init__(self, vk_codes):
+        self.state = {vk: False for vk in vk_codes}
+        self.ok = False
+        self._proc = None            # 防 GC
+        t = threading.Thread(target=self._run, daemon=True)
+        t.start()
+
+    def _run(self):
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [("vkCode", wt.DWORD), ("scanCode", wt.DWORD),
+                        ("flags", wt.DWORD), ("time", wt.DWORD),
+                        ("dwExtraInfo", ctypes.c_size_t)]
+
+        HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
+                                      wt.WPARAM, wt.LPARAM)
+
+        def proc(n_code, w_param, l_param):
+            if n_code >= 0:
+                kb = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                if not (kb.flags & self._LLKHF_INJECTED) and kb.vkCode in self.state:
+                    if w_param in self._WM_DOWN:
+                        self.state[kb.vkCode] = True
+                    elif w_param in self._WM_UP:
+                        self.state[kb.vkCode] = False
+            return _user32.CallNextHookEx(None, n_code, w_param, l_param)
+
+        self._proc = HOOKPROC(proc)
+        hook = _user32.SetWindowsHookExW(13, self._proc, None, 0)  # WH_KEYBOARD_LL
+        if not hook:
+            return  # ok 維持 False → 呼叫端退回 GetAsyncKeyState
+        self.ok = True
+        msg = wt.MSG()
+        while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0):
+            pass
 
 
 def _right_click_at(sx: int, sy: int) -> None:
@@ -207,6 +257,8 @@ class HoldWiggle:
         # 所以每 guard_interval 秒就看一次位置，出界立刻推回，不等挪步時機。
         self.guard_interval = 2.5
         self._guard_next = 0.0
+        self._phys = None            # 實體按鍵鉤子（run() 時建立）
+        self._stuck_note_ts = 0.0
         self._last_y = None                         # 最近一次玩家點的小地圖 y
         self._edge_center_y = None                  # 啟用時的高度（偵測掉層用）
         self._y_off_count = 0
@@ -636,26 +688,41 @@ class HoldWiggle:
         return None
 
     def _user_intervened(self):
-        """使用者是否按著方向鍵（攻擊鍵是我們自己在點，不算介入）。
+        """使用者是否「實體」按著方向鍵（攻擊鍵是我們自己在點，不算介入）。
 
-        方向鍵顯示按住時，可能其實是我們自己的 keyup 掉包（按鍵卡死）——
-        先補送 keyup 再確認一次：真人按住的話 80ms 內鍵盤重複事件會再把
-        狀態壓下去（仍判定介入）；是卡死的話就地解除，不再誤判暫停。
+        以低階鉤子的實體按鍵狀態為準：你的手優先、絕不干擾。實體沒按、
+        但系統狀態卻顯示按住 = 我們注入的 keyup 掉包（按鍵卡死）→ 就地
+        補放開（不然角色會一直走到掉出平台）。鉤子裝不起來時退回舊行為。
         """
-        if not any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS):
-            return False
-        if not self.dry_run:
-            for k in ("left", "right"):
-                if _pressed(_VK[k]):
-                    _send_key(k, keyup=True)
-            time.sleep(0.08)
-            if not any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS):
-                print("  🔧 偵測到方向鍵卡死（keyup 掉包）→ 已強制放開")
+        if self._phys is not None and self._phys.ok:
+            if any(self._phys.state.get(_VK[k], False) for k in self.INTERVENE_KEYS):
+                if any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS):
+                    return True   # 實體按住 → 真的介入，完全不出手
+                # 實體=按住但系統=放開：鉤子狀態過期（callback 被系統解掛？）
+                # → 重置，避免永久誤判成介入而卡在暫停
+                for vk in self._phys.state:
+                    self._phys.state[vk] = False
                 return False
-        return True
+            stuck = [k for k in self.INTERVENE_KEYS if _pressed(_VK[k])]
+            if stuck and not self.dry_run:
+                for k in stuck:
+                    if k in _SCAN:
+                        _send_key(k, keyup=True)
+                now = time.time()
+                if now - self._stuck_note_ts > 2.0:
+                    print(f"  🔧 方向鍵卡死（{'/'.join(stuck)} keyup 掉包）→ 已強制放開")
+                    self._stuck_note_ts = now
+            return False
+        return any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS)
 
     def _user_direction(self):
-        """使用者當下按的是左還右（用來記住你手動換邊的方向）；都沒按回 None。"""
+        """使用者當下實體按的是左還右（記住你手動換邊的方向）；都沒按回 None。"""
+        if self._phys is not None and self._phys.ok:
+            if self._phys.state.get(_VK["left"], False):
+                return "left"
+            if self._phys.state.get(_VK["right"], False):
+                return "right"
+            return None
         if _pressed(_VK["left"]):
             return "left"
         if _pressed(_VK["right"]):
@@ -793,6 +860,14 @@ class HoldWiggle:
             return 1
         self._hwnd = hwnd
         self._window_keyword = window_keyword
+        # 實體按鍵鉤子：區分「你的手」和「我們注入的鍵」，你的操作永遠優先
+        if not self.dry_run:
+            self._phys = _PhysicalKeys(tuple(_VK[k] for k in self.INTERVENE_KEYS))
+            time.sleep(0.3)
+            if self._phys.ok:
+                print("  ✓ 實體按鍵鉤子啟用：手動操作優先，注入卡鍵自動解除")
+            else:
+                print("  （實體按鍵鉤子裝不起來 → 介入判斷退回舊模式）")
         if not self.dry_run:
             fg_ok = False
             for _ in range(5):     # UAC 彈窗剛關/焦點鎖時第一次常失敗，多試幾次
