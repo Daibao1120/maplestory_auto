@@ -71,6 +71,8 @@ assets/templates/monsters/*
 assets/templates/buffs/*
 !assets/templates/buffs/.gitkeep
 !assets/templates/buffs/README.md
+# 採集器的候選暫存（人工挑選後搬進 monsters/）
+assets/templates/_candidates/
 
 # 校準用遊戲截圖（同上，不進版控）
 tests/data/
