@@ -62,6 +62,28 @@ def test_minimap_none_when_absent():
     assert MinimapLocator().locate_player(np.zeros((50, 50, 3), np.uint8)) is None
 
 
+def test_find_platform_run_tolerates_draw_gap():
+    from src.vision.minimap import find_platform_run
+    mask = np.zeros((20, 40), dtype=bool)
+    mask[10, 8:25] = True
+    mask[10, 15] = False               # 1px 繪圖縫 → 容忍
+    assert find_platform_run(mask, 18, 8) == (10, 8, 24)
+
+
+def test_find_platform_run_stops_at_real_hole():
+    from src.vision.minimap import find_platform_run
+    mask = np.zeros((20, 60), dtype=bool)
+    mask[6, 10:20] = True
+    mask[6, 24:40] = True              # 中間隔 4px = 真的洞，不可跨越
+    assert find_platform_run(mask, 26, 4) == (6, 24, 39)
+
+
+def test_find_platform_run_none_when_airborne():
+    from src.vision.minimap import find_platform_run
+    mask = np.zeros((20, 40), dtype=bool)
+    assert find_platform_run(mask, 20, 2) is None
+
+
 def test_minimap_roi_scales_with_reference_size():
     # ROI 以 100x50 視窗校準；實際畫面 200x100（2 倍）→ ROI 自動 ×2、
     # 輸出座標除回校準尺度（設定檔的小地圖座標因此與解析度無關）

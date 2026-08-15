@@ -227,12 +227,19 @@ def detection_snapshot(window_keyword="新楓之谷"):
         h, w = f1.shape[:2]
         lines.append(f"視窗畫面：{w}×{h}")
 
-        # 1) 小地圖人物
+        # 1) 小地圖人物＋腳下平台
         mmloc = MinimapLocator(cfg["vision"]["minimap"])
         cands = mmloc.locate_player_candidates(f1)
         pos = PlayerTracker().update(cands)
         lines.append(f"小地圖人物：{pos if pos else '讀不到'}"
                      f"（候選 {len(cands)} 個：{cands[:3]}）")
+        span = mmloc.platform_span(f1, pos) if pos else None
+        if span:
+            lines.append(f"腳下平台：寬 {span['width']:.0f}｜距左端 {span['dist_left']:.0f}"
+                         f"｜距右端 {span['dist_right']:.0f}"
+                         "（小地圖校準px，1px ≈ 37 畫面px）")
+        else:
+            lines.append("腳下平台：讀不到地形列（跳躍中/掉落中？）")
 
         # 2) 左右動靜（怪在哪邊）
         time.sleep(0.15)

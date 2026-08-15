@@ -28,6 +28,47 @@ class Rect:
     height: int
 
 
+def find_platform_run(mask, px, py, gap_tol=1, min_run=5, dy_max=15, seed_r=4):
+    """在地形遮罩上找「玩家點正下方」的平台列，回傳 (row_y, left_x, right_x)。
+
+    mask: 2D bool/0-1 陣列（True=地形）。從玩家點往下最多 dy_max 列，
+    找第一列在 ±seed_r 內接得上地形的，沿列往兩側延伸（容忍 gap_tol px
+    的繪圖縫；更大的缺口 = 真的洞）。列寬不足 min_run 視為雜訊繼續找。
+    找不到回傳 None。純邏輯（不需 cv2），可單獨測試。
+    """
+    h, w = mask.shape[:2]
+    for dy in range(0, dy_max):
+        yy = py + dy
+        if yy >= h:
+            break
+        seed = None
+        for ddx in sorted(range(-seed_r, seed_r + 1), key=abs):
+            xx = px + ddx
+            if 0 <= xx < w and mask[yy][xx]:
+                seed = xx
+                break
+        if seed is None:
+            continue
+        row = mask[yy]
+
+        def _extend(step):
+            x, gap, last = seed, 0, seed
+            while 0 <= x < w:
+                if row[x]:
+                    last, gap = x, 0
+                else:
+                    gap += 1
+                    if gap > gap_tol:
+                        break
+                x += step
+            return last
+
+        lx, rx = _extend(-1), _extend(1)
+        if rx - lx + 1 >= min_run:
+            return yy, lx, rx
+    return None
+
+
 class PlayerTracker:
     """跨圈追蹤小地圖玩家點，過濾「座標亂跳」的誤判（純邏輯，不需 cv2）。
 
@@ -192,6 +233,36 @@ class MinimapLocator:
                 l, t, w, h = l * sx, t * sy, w * sx, h * sy
         li, ti = max(0, int(round(l))), max(0, int(round(t)))
         return frame[ti:ti + int(round(h)), li:li + int(round(w))], sx, sy
+
+    def platform_span(self, frame, player_pos, s_min=100, v_lo=20, v_hi=200,
+                      gap_tol=1, min_run=5, dy_max=15, seed_r=4):
+        """量測「玩家腳下平台」在小地圖上的左右端點（校準尺度座標）。
+
+        小地圖把平台畫成地形列，且永遠不會被寵物/玩家/特效遮擋——比從
+        遊戲畫面找平台可靠得多。地形特徵（實測校準）：高飽和且「不太亮」
+        （背景是低飽和灰、玩家與其他標記點是超亮點，一條規則同時排除）。
+        回傳 dict(left/right/width/dist_left/dist_right/row_y) 或 None。
+        """
+        if not _CV_AVAILABLE or np is None or frame is None or player_pos is None:
+            return None
+        region, sx, sy = self._crop_scaled(frame)
+        if region.size == 0:
+            return None
+        px, py = int(player_pos[0] * sx), int(player_pos[1] * sy)
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        s = hsv[:, :, 1].astype(np.int32)
+        v = hsv[:, :, 2].astype(np.int32)
+        terrain = (s >= s_min) & (v >= v_lo) & (v < v_hi)
+        hit = find_platform_run(terrain, px, py, gap_tol=gap_tol,
+                                min_run=min_run, dy_max=dy_max, seed_r=seed_r)
+        if hit is None:
+            return None
+        yy, lx, rx = hit
+        return {
+            "left": lx / sx, "right": rx / sx, "row_y": yy / sy,
+            "width": (rx - lx + 1) / sx,
+            "dist_left": (px - lx) / sx, "dist_right": (rx - px) / sx,
+        }
 
     def _mask(self, region, lower, upper):
         hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
