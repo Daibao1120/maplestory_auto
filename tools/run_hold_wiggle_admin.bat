@@ -86,15 +86,15 @@ REM                           step overshoot and walk off the platform). Put a
 REM                           screenshot of each unwanted buff icon into
 REM                           assets\templates\buffs\ first; without templates
 REM                           it just prints a hint and stays off.
-REM   --jump-in-place         reposition by JUMPING straight up instead of
-REM                           walking: zero horizontal movement, so on narrow
-REM                           branch platforms (e.g. Swamp III) it can never
-REM                           walk itself off. Side-switching still happens;
-REM                           the only walking left is the edge-guard pushing
-REM                           you back to center when monsters knock you away.
-REM                           REMOVE this flag on wide flat maps if you prefer
-REM                           the small patrol steps.
-%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --edge-guard --edge-margin 4 --jump-in-place --dispel-buff --face left --fixed-face --no-smart-face --interval-min 40 --interval-max 55 --no-refocus
+REM   --shuffle               reposition with a tiny THERE-AND-BACK step: real
+REM                           horizontal movement (the stale-attack check needs
+REM                           horizontal displacement -- jumping in place does
+REM                           NOT reset it), but net movement ~0 so narrow
+REM                           branch platforms are safe. The outbound leg goes
+REM                           toward the platform center first, and the return
+REM                           leg is slightly shorter, so each shuffle nudges
+REM                           you back toward center.
+%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --edge-guard --edge-margin 4 --shuffle --dispel-buff --face left --fixed-face --no-smart-face --interval-min 40 --interval-max 55 --no-refocus
 
 echo.
 echo Finished. Press any key to close.

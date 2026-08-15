@@ -184,7 +184,7 @@ class HoldWiggle:
                  edge_guard=False, edge_margin=6,
                  dispel_buff=False, dispel_interval=5.0,
                  alternate_face=True, swap_every=1,
-                 smart_face=True, tuning_path=None, dry_run=False):
+                 smart_face=True, shuffle=False, tuning_path=None, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
@@ -195,6 +195,10 @@ class HoldWiggle:
         self.enable_move = enable_move              # False = 完全不移動，只連點攻擊
         self.jump_in_place = jump_in_place          # True = 改用原地跳重定位（小平台不會掉下去）
         self.jump_key = jump_key                    # 跳躍鍵
+        # 小碎步：往一邊走一小步再走回來。攻擊失效判定看「水平位移」（原地跳
+        # 沒用），這樣有真實位移、淨位移≈0，細樹枝平台也安全；回程刻意稍短，
+        # 每次淨往中心靠一點。
+        self.shuffle = shuffle
         self.edge_guard = edge_guard                # True = 用小地圖真實 x 巡邏、到邊界折返（不會走出平台）
         self.edge_margin = int(edge_margin)         # 安全界：起始 x ± 這麼多小地圖 px
         self._edge_guard_wanted = edge_guard        # 啟動時失敗不放棄：之後每次挪步前再試著啟用
@@ -667,6 +671,29 @@ class HoldWiggle:
         if self._edge_guard_wanted and not self.edge_guard:
             self._try_enable_edge_guard(retries=3)
         target = self._next_face()   # 這一輪之後要朝哪邊打（防失效的「換邊」在這裡）
+        if self.shuffle:
+            # 小碎步：去程優先往中心（絕不先往外），回程走回來但稍短
+            if self.edge_guard and self._edge_center is not None:
+                x = self._player_x(retries=2, gap=0.1)
+                ref = x if x is not None else self._last_x
+                if ref is not None and abs(ref - self._edge_center) > 1:
+                    d1 = "right" if ref < self._edge_center else "left"
+                else:
+                    d1 = "right" if self._patrol_dir > 0 else "left"
+                    self._patrol_dir *= -1
+            else:
+                d1 = "right" if self._patrol_dir > 0 else "left"
+                self._patrol_dir *= -1
+            d2 = "left" if d1 == "right" else "right"
+            t1 = self.move_time + random.uniform(-0.01, 0.01)
+            self._tap(d1, hold=t1)
+            time.sleep(random.uniform(0.08, 0.18))
+            self._tap(d2, hold=t1 * 0.8)     # 回程稍短：淨位移往 d1（中心側）一點點
+            note = self._set_face_after_step(d2, target)
+            arrow = "→右→左" if d1 == "right" else "→左→右"
+            print(f"  ↻ 小碎步 {arrow}（有水平位移、淨移≈0）{note} → 接回攻擊")
+            time.sleep(random.uniform(0.05, 0.12))
+            return
         if self.jump_in_place:
             # 原地跳：直上直下、水平不位移 → 平台再小也掉不出去（前提是跳也算移動）
             self._tap(self.jump_key, hold=random.uniform(0.04, 0.08))
@@ -972,7 +999,11 @@ def parse_args(argv=None):
                    help="調參檔路徑（預設 config/tuning.yaml）；配合 tools/tuner.py 的 UI "
                         "邊跑邊調，每 2 秒自動套用。檔案不存在則忽略")
     p.add_argument("--jump-in-place", action="store_true",
-                   help="改用『原地跳』重定位（直上直下不位移，小平台不會掉下去）")
+                   help="改用『原地跳』重定位（直上直下不位移，小平台不會掉下去；"
+                        "注意：攻擊失效判定看水平位移，原地跳解不了失效）")
+    p.add_argument("--shuffle", action="store_true",
+                   help="改用『小碎步』重定位：往一邊走一小步立刻走回來——有真實水平位移"
+                        "（解攻擊失效），淨位移≈0（細樹枝平台也安全）；去程優先往中心")
     p.add_argument("--jump-key", default="alt", choices=sorted(_SCAN),
                    help="跳躍鍵（預設 alt）")
     p.add_argument("--no-move", action="store_true",
@@ -997,6 +1028,7 @@ def main(argv=None):
                     attack_interval=args.attack_interval, patrol_steps=args.patrol_steps,
                     attack_facing=args.face, enable_move=not args.no_move,
                     refocus=not args.no_refocus, jump_in_place=args.jump_in_place,
+                    shuffle=args.shuffle,
                     jump_key=args.jump_key, edge_guard=args.edge_guard,
                     edge_margin=args.edge_margin, dispel_buff=args.dispel_buff,
                     dispel_interval=args.dispel_interval,
