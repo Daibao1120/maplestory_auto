@@ -270,9 +270,23 @@ class HoldWiggle:
 
     def _tap(self, key, hold=None):
         self._down(key)
-        # 按住時間帶隨機（人不會每次都按一樣久）；夾住下限避免負值
-        time.sleep(max(0.0, hold if hold is not None else random.uniform(0.04, 0.10)))
-        self._up(key)
+        try:
+            # 按住時間帶隨機（人不會每次都按一樣久）；夾住下限避免負值
+            time.sleep(max(0.0, hold if hold is not None else random.uniform(0.04, 0.10)))
+        finally:
+            self._up(key)   # 無論如何都要放開——keyup 掉了角色會一直走到掉下平台
+
+    def _release_moves(self):
+        """保險絲：補送左右鍵 keyup。
+
+        SendInput 的 keyup 偶爾會被掉包（遊戲掉幀/焦點切換瞬間），方向鍵
+        就會卡在按住狀態——角色自己一直走、直到走出平台，任何位置防護都
+        推不贏一顆按死的鍵。在每次送過移動鍵之後都補放開一次。
+        """
+        if self.dry_run:
+            return
+        for k in ("left", "right"):
+            _send_key(k, keyup=True)
 
     def _attack_once(self):
         """點一下攻擊鍵。連續呼叫 = 連續攻擊，比『按住不放』可靠——
@@ -531,6 +545,7 @@ class HoldWiggle:
         self._tap(d, hold=max(0.12, min(self.move_time, 0.25)))
         if d != self.attack_facing:
             self._reface(self.attack_facing)
+        self._release_moves()   # 保險絲：防 keyup 掉包卡鍵
         print(f"  ⛑ 滑出安全界（x={x}，中心 {self._edge_center}±{self.edge_margin}，"
               f"被擊退？）→ 往{'右' if d == 'right' else '左'}推回")
 
@@ -621,8 +636,23 @@ class HoldWiggle:
         return None
 
     def _user_intervened(self):
-        """使用者是否按著方向鍵（攻擊鍵是我們自己在點，不算介入）。"""
-        return any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS)
+        """使用者是否按著方向鍵（攻擊鍵是我們自己在點，不算介入）。
+
+        方向鍵顯示按住時，可能其實是我們自己的 keyup 掉包（按鍵卡死）——
+        先補送 keyup 再確認一次：真人按住的話 80ms 內鍵盤重複事件會再把
+        狀態壓下去（仍判定介入）；是卡死的話就地解除，不再誤判暫停。
+        """
+        if not any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS):
+            return False
+        if not self.dry_run:
+            for k in ("left", "right"):
+                if _pressed(_VK[k]):
+                    _send_key(k, keyup=True)
+            time.sleep(0.08)
+            if not any(_pressed(_VK[k]) for k in self.INTERVENE_KEYS):
+                print("  🔧 偵測到方向鍵卡死（keyup 掉包）→ 已強制放開")
+                return False
+        return True
 
     def _user_direction(self):
         """使用者當下按的是左還右（用來記住你手動換邊的方向）；都沒按回 None。"""
@@ -899,6 +929,7 @@ class HoldWiggle:
                     now = time.time()
                     if self.enable_move and now - cycle_start >= wait:
                         self._move()
+                        self._release_moves()   # 保險絲：防 keyup 掉包卡鍵
                         cycle_start = time.time()
                         wait = self._next_interval()
                         self._next_attack = 0.0  # 移動後立刻接回攻擊（下一圈馬上點）
