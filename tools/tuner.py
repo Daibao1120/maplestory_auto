@@ -38,6 +38,7 @@ PARAMS = [
     ("move_time", "每步按方向鍵秒數（<0.1 只轉身不走）", 0.18, float),
     ("max_step_seconds", "每步秒數安全上限（量平台後自動算）", 0.6, float),
     ("edge_margin", "小地圖安全界（起始點 ± px）", 6, int),
+    ("guard_interval", "位置警衛巡界間隔（秒；出界立即推回）", 2.5, float),
     ("swap_every", "每幾次挪步換邊（輪流模式）", 1, int),
     ("alternate_face", "沒偵測到怪時輪流換邊 (1/0)", 1, int),
     ("smart_face", "哪邊怪多打哪邊 (1/0)", 1, int),

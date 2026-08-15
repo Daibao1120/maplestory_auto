@@ -199,6 +199,13 @@ class HoldWiggle:
         self.edge_margin = int(edge_margin)         # 安全界：起始 x ± 這麼多小地圖 px
         self._edge_guard_wanted = edge_guard        # 啟動時失敗不放棄：之後每次挪步前再試著啟用
         self._edge_guard_broken = False             # 缺套件等致命錯 → 不再重試
+        # 常駐位置警衛：挪步之間怪物擊退也會把角色往外推（不按鍵也位移），
+        # 所以每 guard_interval 秒就看一次位置，出界立刻推回，不等挪步時機。
+        self.guard_interval = 2.5
+        self._guard_next = 0.0
+        self._last_y = None                         # 最近一次玩家點的小地圖 y
+        self._edge_center_y = None                  # 啟用時的高度（偵測掉層用）
+        self._y_off_count = 0
         self.dispel_buff = dispel_buff              # True = 偵測「要點掉的 buff」（如速度激發）並右鍵移除
         self.dispel_interval = float(dispel_interval)
         # 防攻擊失效的關鍵是「真的換邊打」：挪步後朝新的一側持續輸出到下一次
@@ -297,6 +304,7 @@ class HoldWiggle:
         "move_time": ("move_time", float),
         "max_step_seconds": ("max_step_seconds", float),
         "edge_margin": ("edge_margin", int),
+        "guard_interval": ("guard_interval", float),
         "swap_every": ("swap_every", int),
         "alternate_face": ("alternate_face", bool),
         "smart_face": ("smart_face", bool),
@@ -481,9 +489,46 @@ class HoldWiggle:
         self._edge_center = sx
         self._edge_lo = sx - self.edge_margin
         self._edge_hi = sx + self.edge_margin
+        self._edge_center_y = self._last_y
+        self._y_off_count = 0
         self.edge_guard = True
-        print(f"  ✓ edge-guard 啟用：中心 x={sx}（移動一律往這裡回歸，貼著中心不往外走）")
+        print(f"  ✓ edge-guard 啟用：中心 x={sx}"
+              f"（每 {self.guard_interval:.1f}s 巡界，出界即推回；被擊退也擋得住）")
         return True
+
+    def _edge_guard_tick(self):
+        """常駐位置警衛：出安全界立刻推回；高度變了（掉層）就以新位置重設中心。
+
+        怪物碰撞擊退不需要按鍵就會推動角色，只靠挪步時檢查（40~55 秒一次）
+        中間有大段盲區——細樹枝平台上累積十幾秒就出界了。
+        """
+        if not self.edge_guard or self._edge_center is None:
+            return
+        x = self._player_x(retries=1, gap=0.0)
+        if x is None:
+            return
+        y = self._last_y
+        # 掉層/被打下平台：高度連續兩次偏離 → 舊中心已無意義，以現在位置重設
+        if (self._edge_center_y is not None and y is not None
+                and abs(y - self._edge_center_y) >= 3):
+            self._y_off_count += 1
+            if self._y_off_count >= 2:
+                print(f"  ⚠ 高度變了（y {self._edge_center_y}→{y}，掉層/被打下平台？）"
+                      "→ 以現在位置重設中心")
+                self._edge_center, self._edge_center_y = x, y
+                self._edge_lo = x - self.edge_margin
+                self._edge_hi = x + self.edge_margin
+                self._y_off_count = 0
+            return
+        self._y_off_count = 0
+        if self._edge_lo <= x <= self._edge_hi:
+            return
+        d = "right" if x < self._edge_center else "left"
+        self._tap(d, hold=max(0.12, min(self.move_time, 0.25)))
+        if d != self.attack_facing:
+            self._reface(self.attack_facing)
+        print(f"  ⛑ 滑出安全界（x={x}，中心 {self._edge_center}±{self.edge_margin}，"
+              f"被擊退？）→ 往{'右' if d == 'right' else '左'}推回")
 
     # ---- dispel-buff：偵測「要點掉的 buff」（如速度激發）並右鍵移除 ----
     def _init_dispel(self):
@@ -560,9 +605,11 @@ class HoldWiggle:
                 cands = []
             if cands:
                 if fresh or self._last_x is None:
+                    self._last_y = cands[0][1]
                     return cands[0][0]                       # 最大塊
                 best = min(cands, key=lambda b: abs(b[0] - self._last_x))
                 if abs(best[0] - self._last_x) <= self.max_jump:
+                    self._last_y = best[1]
                     return best[0]
                 # 最接近的都跳太遠 → 這張可能是誤判/雜訊，再抓一張
             if i < retries - 1:
@@ -797,6 +844,11 @@ class HoldWiggle:
                         self._dispel_check()
                         self._dispel_last = time.time()
 
+                    # 常駐位置警衛：怪物擊退不按鍵也會推動角色，出界立刻推回
+                    if self.edge_guard and time.time() >= self._guard_next:
+                        self._edge_guard_tick()
+                        self._guard_next = time.time() + self.guard_interval
+
                     # 擬人化：每隔 8~14 秒看一眼哪邊動靜多（= 怪在哪邊），怪明顯
                     # 移到另一邊就跟著轉過去打——像人在顧螢幕，不是機械輪流。
                     if self.smart_face and time.time() >= self._smart_next:
@@ -845,6 +897,8 @@ class HoldWiggle:
                                 self._edge_center = nx
                                 self._edge_lo = nx - self.edge_margin
                                 self._edge_hi = nx + self.edge_margin
+                                self._edge_center_y = self._last_y
+                                self._y_off_count = 0
                                 print(f"    edge-guard 重新定位：中心 x={nx}（往這裡回歸）")
                         state = "RUNNING"
                         cycle_start = time.time()
