@@ -76,7 +76,7 @@ _KEYEVENTF_EXTENDEDKEY = 0x0001
 _MOUSEEVENTF_RIGHTDOWN = 0x0008
 _MOUSEEVENTF_RIGHTUP = 0x0010
 
-# 名稱 → (scancode, 是否為擴充鍵)。方向鍵必須是擴充鍵，否則遊戲可能收不到。
+# 名稱 → (scancode, 是否為擴充鍵)。方向鍵/編輯區鍵必須是擴充鍵，否則遊戲可能收不到。
 _SCAN = {
     "left":  (0x4B, True),
     "right": (0x4D, True),
@@ -86,12 +86,22 @@ _SCAN = {
     "alt":   (0x38, False),
     "space": (0x39, False),
     "shift": (0x2A, False),
+    "delete": (0x53, True),
+    "end":    (0x4F, True),
+    "insert": (0x52, True),
+    "home":   (0x47, True),
+    "pageup": (0x49, True),
+    "pagedown": (0x51, True),
+    "f1": (0x3B, False), "f2": (0x3C, False), "f3": (0x3D, False), "f4": (0x3E, False),
 }
 
 # 名稱 → 虛擬鍵碼（給 GetAsyncKeyState 讀「使用者有沒有按」）
 _VK = {
     "left": 0x25, "up": 0x26, "right": 0x27, "down": 0x28,
     "ctrl": 0x11, "alt": 0x12, "space": 0x20, "shift": 0x10, "f12": 0x7B,
+    "delete": 0x2E, "end": 0x23, "insert": 0x2D, "home": 0x24,
+    "pageup": 0x21, "pagedown": 0x22,
+    "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73,
 }
 
 _user32 = ctypes.windll.user32
