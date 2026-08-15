@@ -103,11 +103,18 @@ class MinimapLocator:
     def __init__(self, config=None):
         config = config or {}
         self.roi = config.get("roi")  # [left, top, width, height] 或 None
+        # ROI 校準時的視窗大小 [寬, 高]；實際視窗不同尺寸（如 2 倍解析度）時
+        # 會等比縮放 ROI，並把輸出座標除回校準尺度——設定檔裡所有小地圖座標
+        # （巡邏邊界、平台範圍、max_jump…）因此與視窗解析度無關。
+        self.reference_size = config.get("reference_size")
         self.player_lower = tuple(config.get("player_color_lower", [24, 180, 180]))
         self.player_upper = tuple(config.get("player_color_upper", [40, 255, 255]))
         self.other_lower = tuple(config.get("other_color_lower", [0, 0, 200]))
         self.other_upper = tuple(config.get("other_color_upper", [180, 40, 255]))
         self.min_blob_area = int(config.get("min_blob_area", 2))
+        # 面積上限：玩家點只有十幾 px；ROI 放寬後可能掃到場景裡的大片亮黃
+        # （花叢/告示牌），超過上限的色塊一律不是玩家點。None = 不設限。
+        self.max_blob_area = config.get("max_blob_area")
 
     # ---- 對外 ----
     def locate_minimap(self, frame):
@@ -115,17 +122,20 @@ class MinimapLocator:
         return Rect(*self.roi) if self.roi else None
 
     def locate_player(self, frame):
-        """回傳玩家在小地圖(ROI)內的座標 (x, y)；找不到或缺套件回傳 None。"""
+        """回傳玩家在小地圖(ROI)內的座標 (x, y)（校準尺度）；找不到回傳 None。"""
         if not _CV_AVAILABLE or np is None or frame is None:
             return None
-        region = self._crop_roi(frame)
+        region, sx, sy = self._crop_scaled(frame)
         if region.size == 0:
             return None
         mask = self._mask(region, self.player_lower, self.player_upper)
-        return self._largest_blob_centroid(mask)
+        pos = self._largest_blob_centroid(mask)
+        if pos is None:
+            return None
+        return (int(round(pos[0] / sx)), int(round(pos[1] / sy)))
 
     def locate_player_candidates(self, frame):
-        """回傳所有「玩家色」色塊 [(x, y, area), ...]（小地圖 ROI 座標，面積大到小）。
+        """回傳所有「玩家色」色塊 [(x, y, area), ...]（校準尺度座標，面積大到小）。
 
         小地圖上可能有多個黃色標記（玩家、任務、傳點…），`locate_player` 只回最大塊，
         有時會挑錯。呼叫端可用這份清單自行挑「最接近上次位置」的塊，並過濾誤判。
@@ -133,7 +143,7 @@ class MinimapLocator:
         """
         if not _CV_AVAILABLE or np is None or frame is None:
             return []
-        region = self._crop_roi(frame)
+        region, sx, sy = self._crop_scaled(frame)
         if region.size == 0:
             return []
         mask = self._mask(region, self.player_lower, self.player_upper)
@@ -141,31 +151,47 @@ class MinimapLocator:
         out = []
         for lbl in range(1, num):  # 跳過背景
             area = int(stats[lbl, cv2.CC_STAT_AREA])
-            if area >= self.min_blob_area:
+            if area >= self.min_blob_area and not self._too_big(area):
                 cx, cy = centroids[lbl]
-                out.append((int(round(cx)), int(round(cy)), area))
+                out.append((int(round(cx / sx)), int(round(cy / sy)), area))
         return sorted(out, key=lambda b: -b[2])
 
+    def _too_big(self, area):
+        return self.max_blob_area is not None and area > int(self.max_blob_area)
+
     def locate_others(self, frame):
-        """回傳其他玩家標記的概略重心 (x, y)；找不到回傳 None。"""
+        """回傳其他玩家標記的概略重心 (x, y)（校準尺度）；找不到回傳 None。"""
         if not _CV_AVAILABLE or np is None or frame is None:
             return None
-        region = self._crop_roi(frame)
+        region, sx, sy = self._crop_scaled(frame)
         if region.size == 0:
             return None
         mask = self._mask(region, self.other_lower, self.other_upper)
         ys, xs = np.where(mask > 0)
         if len(xs) == 0:
             return None
-        return (int(xs.mean()), int(ys.mean()))
+        return (int(xs.mean() / sx), int(ys.mean() / sy))
 
     # ---- 內部 ----
-    def _crop_roi(self, frame):
+    def _crop_scaled(self, frame):
+        """裁出小地圖 ROI；回傳 (區域, x縮放, y縮放)。
+
+        設定 reference_size 且實際視窗大小不同時，把 ROI 等比縮放到實際
+        解析度（例如 2736 寬視窗 vs 1371 校準 → ROI ×2），呼叫端再把
+        偵測到的座標除回縮放係數，維持校準尺度。
+        """
         if not self.roi:
-            return frame
-        l, t, w, h = (int(v) for v in self.roi)
-        l, t = max(0, l), max(0, t)
-        return frame[t:t + h, l:l + w]
+            return frame, 1.0, 1.0
+        l, t, w, h = (float(v) for v in self.roi)
+        sx = sy = 1.0
+        if (self.reference_size and frame is not None and hasattr(frame, "shape")):
+            rw, rh = (float(v) for v in self.reference_size)
+            fh, fw = frame.shape[:2]
+            if rw > 0 and rh > 0 and (fw != rw or fh != rh):
+                sx, sy = fw / rw, fh / rh
+                l, t, w, h = l * sx, t * sy, w * sx, h * sy
+        li, ti = max(0, int(round(l))), max(0, int(round(t)))
+        return frame[ti:ti + int(round(h)), li:li + int(round(w))], sx, sy
 
     def _mask(self, region, lower, upper):
         hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
@@ -179,7 +205,7 @@ class MinimapLocator:
         best_label, best_area = 0, 0
         for lbl in range(1, num):  # 跳過背景
             area = int(stats[lbl, cv2.CC_STAT_AREA])
-            if area > best_area:
+            if area > best_area and not self._too_big(area):
                 best_area, best_label = area, lbl
         if best_area < self.min_blob_area:
             return None

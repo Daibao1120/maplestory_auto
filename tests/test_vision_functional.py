@@ -62,6 +62,22 @@ def test_minimap_none_when_absent():
     assert MinimapLocator().locate_player(np.zeros((50, 50, 3), np.uint8)) is None
 
 
+def test_minimap_roi_scales_with_reference_size():
+    # ROI 以 100x50 視窗校準；實際畫面 200x100（2 倍）→ ROI 自動 ×2、
+    # 輸出座標除回校準尺度（設定檔的小地圖座標因此與解析度無關）
+    from src.vision.minimap import MinimapLocator
+    frame = np.zeros((100, 200, 3), dtype=np.uint8)
+    cv2.circle(frame, (60, 40), 3, (0, 255, 255), thickness=-1)  # 實際px＝校準(30,20)×2
+    loc = MinimapLocator({"roi": [10, 10, 60, 30], "reference_size": [100, 50],
+                          "min_blob_area": 2})
+    pos = loc.locate_player(frame)
+    assert pos is not None
+    # 校準尺度下：點 (30,20) − ROI 原點 (10,10) = (20,10)
+    assert abs(pos[0] - 20) <= 2 and abs(pos[1] - 10) <= 2
+    cands = loc.locate_player_candidates(frame)
+    assert cands and abs(cands[0][0] - 20) <= 2 and abs(cands[0][1] - 10) <= 2
+
+
 # ---------------- 血條讀值 ----------------
 def _make_bar(width, ratio, color_bgr, roi):
     frame = np.zeros((60, roi[0] + roi[2] + 40, 3), dtype=np.uint8)
