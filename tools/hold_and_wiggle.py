@@ -197,6 +197,8 @@ class HoldWiggle:
         self.jump_key = jump_key                    # 跳躍鍵
         self.edge_guard = edge_guard                # True = 用小地圖真實 x 巡邏、到邊界折返（不會走出平台）
         self.edge_margin = int(edge_margin)         # 安全界：起始 x ± 這麼多小地圖 px
+        self._edge_guard_wanted = edge_guard        # 啟動時失敗不放棄：之後每次挪步前再試著啟用
+        self._edge_guard_broken = False             # 缺套件等致命錯 → 不再重試
         self.dispel_buff = dispel_buff              # True = 偵測「要點掉的 buff」（如速度激發）並右鍵移除
         self.dispel_interval = float(dispel_interval)
         # 防攻擊失效的關鍵是「真的換邊打」：挪步後朝新的一側持續輸出到下一次
@@ -452,6 +454,37 @@ class HoldWiggle:
             self._cap = ScreenCapture(backend="mss", window_title=self._window_keyword)
         self._mmloc = MinimapLocator(cfg["vision"]["minimap"])
 
+    def _try_enable_edge_guard(self, retries=3, verbose=False):
+        """嘗試（重新）啟用 edge-guard；成功回傳 True。
+
+        啟動時小地圖可能還沒開/在切圖，一次失敗不該永久降級成盲走——
+        盲走正是「偶爾掉出平台」的元凶，之後每次挪步前都會再試。
+        """
+        if self._edge_guard_broken or self.dry_run:
+            return False
+        if self._mmloc is None:
+            try:
+                self._init_edge_guard()
+            except Exception as e:
+                print(f"[警告] edge-guard 初始化失敗（缺 opencv/mss？{e}）→ 改用一般巡邏")
+                self._edge_guard_broken = True
+                self.edge_guard = False
+                return False
+        sx = self._player_x(retries=retries, gap=0.15, fresh=True)
+        if sx is None:
+            if verbose:
+                print("[警告] edge-guard 暫時抓不到小地圖玩家點 → 先用一般巡邏，"
+                      "每次挪步前會自動重試（請確認小地圖有開）")
+            self.edge_guard = False
+            return False
+        self._last_x = sx
+        self._edge_center = sx
+        self._edge_lo = sx - self.edge_margin
+        self._edge_hi = sx + self.edge_margin
+        self.edge_guard = True
+        print(f"  ✓ edge-guard 啟用：中心 x={sx}（移動一律往這裡回歸，貼著中心不往外走）")
+        return True
+
     # ---- dispel-buff：偵測「要點掉的 buff」（如速度激發）並右鍵移除 ----
     def _init_dispel(self):
         """建立模板匹配器並載入 buff 圖示。沒有模板／缺套件 → 停用並提示。"""
@@ -583,6 +616,9 @@ class HoldWiggle:
         """
         if not self.enable_move:
             return
+        # edge-guard 想開卻還沒開成（啟動時小地圖沒就緒）→ 每次挪步前重試
+        if self._edge_guard_wanted and not self.edge_guard:
+            self._try_enable_edge_guard(retries=3)
         target = self._next_face()   # 這一輪之後要朝哪邊打（防失效的「換邊」在這裡）
         if self.jump_in_place:
             # 原地跳：直上直下、水平不位移 → 平台再小也掉不出去（前提是跳也算移動）
@@ -657,24 +693,10 @@ class HoldWiggle:
             print("[錯誤] 無法把遊戲切到前景，按鍵不會生效。")
             return 1
 
-        # edge-guard：建立擷取/定位器，記下起始 x 當中心、設安全左右界
+        # edge-guard：建立擷取/定位器，記下起始 x 當中心、設安全左右界。
+        # 啟動時抓不到玩家點（小地圖沒開/在切圖）不放棄——之後每次挪步前重試。
         if self.edge_guard and not self.dry_run:
-            try:
-                self._init_edge_guard()
-            except Exception as e:
-                print(f"[警告] edge-guard 初始化失敗（缺 opencv/mss？{e}）→ 改用一般巡邏")
-                self.edge_guard = False
-            if self.edge_guard:
-                sx = self._player_x(retries=12, gap=0.15, fresh=True)
-                if sx is None:
-                    print("[警告] edge-guard 抓不到小地圖玩家點 → 改用一般巡邏（請確認遊戲在前景、小地圖有開）")
-                    self.edge_guard = False
-                else:
-                    self._last_x = sx
-                    self._edge_center = sx
-                    self._edge_lo = sx - self.edge_margin
-                    self._edge_hi = sx + self.edge_margin
-                    print(f"  ✓ edge-guard 啟用：中心 x={sx}（移動一律往這裡回歸，貼著中心不往外走）")
+            self._try_enable_edge_guard(retries=12, verbose=True)
 
         # dispel-buff：右上角出現「要點掉的 buff」（如速度激發）→ 右鍵移除
         if self.dispel_buff and not self.dry_run:
@@ -812,8 +834,11 @@ class HoldWiggle:
                         if self._pending_face:       # 採用你手動換到的方向
                             self.attack_facing = self._pending_face
                             self._pending_face = None
-                        # 你手動接手可能把角色走到新位置 → edge-guard 以新位置重設安全界
-                        if self.edge_guard and not self.dry_run:
+                        # 你手動接手可能把角色走到新位置 → edge-guard 以新位置重設安全界；
+                        # 之前沒啟用成功的，也趁這時再試一次
+                        if self._edge_guard_wanted and not self.edge_guard and not self.dry_run:
+                            self._try_enable_edge_guard(retries=8)
+                        elif self.edge_guard and not self.dry_run:
                             nx = self._player_x(retries=8, gap=0.15, fresh=True)
                             if nx is not None:
                                 self._last_x = nx
