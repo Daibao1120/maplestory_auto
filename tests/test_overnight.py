@@ -80,6 +80,60 @@ def test_condemned_potion_gets_retry_after_cooldown():
     assert c.potion_works is None                            # 重新給機會
 
 
+def test_external_heal_mode_never_touches_potion_and_farms_directly():
+    # 寵物負責補血：核心不按任何藥水鍵、不驗證、不因低血停手
+    c = NightWatchCore(heal_mode="external")
+    acts = c.tick(W(0, hp=0.62, pos=(50, 76), span=SPAN(20)))
+    assert "tap" not in verbs(acts)                 # 不碰藥水鍵
+    assert c.state == "DESCEND"                     # 直接開工
+    c.tick(W(1.0, hp=0.62, pos=(50, 90), span=SPAN(20)))
+    assert c.state == "FARM"
+    for dt in range(0, 60, 3):                      # 血一直低也照打
+        acts = c.tick(W(2.0 + dt, hp=0.35, pos=(50, 90), span=SPAN(),
+                        exp_changed=True))
+        assert "tap" not in verbs(acts)
+    assert c.state == "FARM"
+
+
+def test_external_heal_mode_last_resort_still_protects():
+    c = NightWatchCore(heal_mode="external", last_resort_hp=0.20)
+    c.tick(W(0, hp=0.90, pos=(50, 90), span=SPAN(20)))
+    c.tick(W(1.0, hp=0.90, pos=(50, 90), span=SPAN(20)))
+    assert c.state == "FARM"
+    for dt in range(0, 30, 2):                      # 掉到 15% 且持續
+        c.tick(W(2.0 + dt, hp=0.15, pos=(50, 90), span=SPAN(), exp_changed=True))
+    assert c.state != "FARM"                        # 最後保險仍會停手
+
+
+def test_farm_faces_the_side_with_more_monsters():
+    c = NightWatchCore(heal_mode="external")
+    c.tick(W(0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    c.tick(W(1.0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    assert c.state == "FARM"
+    acts = c.tick(W(2.0, hp=0.9, pos=(50, 90), span=SPAN(), mon_left=3, mon_right=1))
+    turns = [a.arg for a in acts if a.verb == "turn"]
+    assert turns == ["left"] and c.facing == "left"
+    # 怪跑到右邊 → 轉過去
+    acts = c.tick(W(5.0, hp=0.9, pos=(50, 90), span=SPAN(), mon_left=0, mon_right=4))
+    assert [a.arg for a in acts if a.verb == "turn"] == ["right"]
+    # 同一側不重複轉身
+    acts = c.tick(W(8.0, hp=0.9, pos=(50, 90), span=SPAN(), mon_left=0, mon_right=4))
+    assert not any(a.verb == "turn" for a in acts)
+    # 兩邊一樣多／沒怪 → 維持面向
+    acts = c.tick(W(11.0, hp=0.9, pos=(50, 90), span=SPAN(), mon_left=2, mon_right=2))
+    assert not any(a.verb == "turn" for a in acts)
+    assert c.facing == "right"
+
+
+def test_turn_is_rate_limited():
+    c = NightWatchCore(heal_mode="external")
+    c.tick(W(0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    c.tick(W(1.0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    c.tick(W(2.0, hp=0.9, pos=(50, 90), span=SPAN(), mon_left=3))
+    acts = c.tick(W(2.5, hp=0.9, pos=(50, 90), span=SPAN(), mon_right=3))
+    assert not any(a.verb == "turn" for a in acts)   # 1 秒內不連續轉身
+
+
 def test_potion_key_auto_discovery_cycles_until_one_heals():
     # 不知道藥水放哪一格 → 自己換鍵試，直到 HP 真的回升為止（不必問使用者）
     c = NightWatchCore(potion_key="delete",

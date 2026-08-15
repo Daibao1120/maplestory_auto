@@ -62,6 +62,65 @@ def test_minimap_none_when_absent():
     assert MinimapLocator().locate_player(np.zeros((50, 50, 3), np.uint8)) is None
 
 
+def test_monster_scale_speeds_up_and_still_matches():
+    # 降取樣偵測：座標仍要落在原尺度的正確位置
+    from src.vision.monster import MonsterDetector
+    rng = np.random.default_rng(7)
+    tmpl = rng.integers(0, 256, (60, 60, 3), dtype=np.uint8)
+    frame = np.zeros((600, 900, 3), dtype=np.uint8)
+    frame[300:360, 500:560] = tmpl
+    det = MonsterDetector({"match_threshold": 0.7, "scale": 0.6})
+    det.add_template("m", tmpl)
+    dets = det.detect(frame)
+    assert len(dets) == 1
+    assert abs(dets[0].x - 500) <= 8 and abs(dets[0].y - 300) <= 8
+    assert abs(dets[0].w - 60) <= 6
+
+
+def test_monster_skip_templates():
+    from src.vision.monster import MonsterDetector
+    rng = np.random.default_rng(8)
+    tmpl = rng.integers(0, 256, (40, 40, 3), dtype=np.uint8)
+    frame = np.zeros((300, 400, 3), dtype=np.uint8)
+    frame[100:140, 200:240] = tmpl
+    det = MonsterDetector({"match_threshold": 0.8, "skip_templates": ["bad"]})
+    det.add_template("bad", tmpl)
+    assert det.detect(frame) == []
+
+
+def test_player_anchor_finds_nametag_off_center():
+    # 角色不在畫面中央時也要定位正確（實機就是這種情形）
+    from src.vision.player_anchor import PlayerAnchor
+    rng = np.random.default_rng(9)
+    frame = rng.integers(0, 60, (800, 1200, 3), dtype=np.uint8)
+    tag = rng.integers(150, 256, (30, 70, 3), dtype=np.uint8)
+    frame[600:630, 300:370] = tag                       # 放在左下角，遠離中央
+    import tempfile
+    p = os.path.join(tempfile.mkdtemp(), "tag.png")
+    cv2.imwrite(p, tag)
+    pa = PlayerAnchor(p, feet_offset_y=6)
+    pos = pa.find(frame)
+    assert pos is not None
+    assert abs(pos[0] - 335) <= 3 and abs(pos[1] - 594) <= 3
+    assert pa.last_score > 0.9
+    # 第二次走局部搜尋路徑，結果需一致
+    assert pa.find(frame) == pos
+
+
+def test_player_anchor_none_when_absent_and_search_window():
+    from src.vision.player_anchor import PlayerAnchor, search_window
+    assert search_window(None, 1000, 800) == (0, 0, 1000, 800)
+    assert search_window((500, 400), 1000, 800, 100) == (400, 300, 600, 500)
+    assert search_window((0, 0), 1000, 800, 5) == (0, 0, 1000, 800)  # 退化→全幀
+    rng = np.random.default_rng(10)
+    frame = np.zeros((400, 600, 3), dtype=np.uint8)
+    tag = rng.integers(150, 256, (20, 40, 3), dtype=np.uint8)
+    import tempfile
+    p = os.path.join(tempfile.mkdtemp(), "tag2.png")
+    cv2.imwrite(p, tag)
+    assert PlayerAnchor(p).find(frame) is None          # 畫面中沒有名牌
+
+
 def test_find_platform_run_tolerates_draw_gap():
     from src.vision.minimap import find_platform_run
     mask = np.zeros((20, 40), dtype=bool)

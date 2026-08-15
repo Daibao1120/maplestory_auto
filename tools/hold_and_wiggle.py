@@ -93,6 +93,18 @@ _SCAN = {
     "pageup": (0x49, True),
     "pagedown": (0x51, True),
     "f1": (0x3B, False), "f2": (0x3C, False), "f3": (0x3D, False), "f4": (0x3E, False),
+    "esc": (0x01, False), "enter": (0x1C, False), "tab": (0x0F, False),
+    # 字母鍵（開背包 i / 世界地圖 w / 商店互動等）
+    "a": (0x1E, False), "b": (0x30, False), "c": (0x2E, False), "d": (0x20, False),
+    "e": (0x12, False), "f": (0x21, False), "g": (0x22, False), "h": (0x23, False),
+    "i": (0x17, False), "j": (0x24, False), "k": (0x25, False), "l": (0x26, False),
+    "m": (0x32, False), "n": (0x31, False), "o": (0x18, False), "p": (0x19, False),
+    "q": (0x10, False), "r": (0x13, False), "s": (0x1F, False), "t": (0x14, False),
+    "u": (0x16, False), "v": (0x2F, False), "w": (0x11, False), "x": (0x2D, False),
+    "y": (0x15, False), "z": (0x2C, False),
+    "0": (0x0B, False), "1": (0x02, False), "2": (0x03, False), "3": (0x04, False),
+    "4": (0x05, False), "5": (0x06, False), "6": (0x07, False), "7": (0x08, False),
+    "8": (0x09, False), "9": (0x0A, False),
 }
 
 # 名稱 → 虛擬鍵碼（給 GetAsyncKeyState 讀「使用者有沒有按」）

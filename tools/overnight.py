@@ -16,7 +16,7 @@ NightWatchCore 是純邏輯：每圈餵入 WorldState（感知快照），回傳
 
 Action 動詞（執行殼契約，一個都不能漏）：
     hold_attack / repress_attack / release_attack / tap / tap_jump /
-    step / release_moves / release_all / right_click / log
+    step / turn / release_moves / release_all / right_click / log
 
 安全鐵則（皆有對應測試）：
     - 補血鍵未證實有效 → 不 FARM；驗證失敗可重試（非一票永決），連續
@@ -52,6 +52,9 @@ class WorldState:
     exp_changed: bool = False
     buff_hit: Optional[Tuple[int, int]] = None
     cmd: str = ""
+    # 怪物偵測（模板匹配、已用同高度帶過濾）：角色左右兩側各幾隻
+    mon_left: int = 0
+    mon_right: int = 0
 
 
 @dataclass
@@ -104,7 +107,11 @@ class NightWatchCore:
                          "pagedown", "shift")
 
     def __init__(self, max_seconds=7.5 * 3600, potion_key="delete", rng=None,
-                 potion_candidates=None):
+                 potion_candidates=None, heal_mode="self", last_resort_hp=0.20):
+        # heal_mode="external"：補血由寵物/使用者負責——核心完全不碰藥水鍵、
+        # 不做藥效驗證、也不因低血停手（只保留 last_resort_hp 最後保險）
+        self.heal_mode = heal_mode
+        self.last_resort_hp = last_resort_hp
         self.max_seconds = max_seconds
         cands = list(potion_candidates or self.POTION_CANDIDATES)
         if potion_key in cands:
@@ -141,6 +148,8 @@ class NightWatchCore:
         self._idle_entered = 0.0
         self._idle_hp0: Optional[float] = None
         self._clean_since: Optional[float] = None
+        self.facing: Optional[str] = None      # 目前面向（依怪物分佈決定）
+        self._last_turn = 0.0
 
     # ---- 主入口 ----
     def tick(self, w: WorldState) -> List[Action]:
@@ -191,12 +200,15 @@ class NightWatchCore:
         # 感知看門狗（FARM/DESCEND）
         self._sensor_watchdogs(w, acts)
 
-        # 補血（含驗證與絕望補血）
-        self._potion_logic(w, acts)
+        # 補血（含驗證與絕望補血）；external 模式完全交給寵物/使用者
+        if self.heal_mode != "external":
+            self._potion_logic(w, acts)
 
         # 低血保險：hp=None 凍結（不重置）計時
+        abort_hp = (self.last_resort_hp if self.heal_mode == "external"
+                    else self.HP_ABORT)
         if w.hp is not None:
-            if w.hp < self.HP_ABORT:
+            if w.hp < abort_hp:
                 if self._hp_low_since is None:
                     self._hp_low_since = w.now
                 elif (w.now - self._hp_low_since > self.HP_ABORT_HOLD
@@ -346,6 +358,10 @@ class NightWatchCore:
 
     # ---- 各狀態 ----
     def _tick_verify(self, w, acts):
+        if self.heal_mode == "external":
+            # 補血交給寵物/使用者 → 不驗證、不按藥，直接去找怪
+            self._to("DESCEND", acts, "補血由寵物負責，直接開工", w)
+            return
         if w.hp is None:
             self._to("IDLE_SAFE", acts, "讀不到 HP", w)
             return
@@ -407,6 +423,17 @@ class NightWatchCore:
         # 驗證期間不進攻（判讀乾淨）
         if self._verify_hp0 is not None:
             return
+
+        # 面向怪多的那一側（模板偵測結果；平手/沒怪則維持現況）
+        side = None
+        if w.mon_left > w.mon_right:
+            side = "left"
+        elif w.mon_right > w.mon_left:
+            side = "right"
+        if side and side != self.facing and w.now - self._last_turn > 1.0:
+            self.facing = side
+            self._last_turn = w.now
+            acts.append(Action("turn", side))
 
         # 攻擊保持
         if not self._atk_held:
@@ -491,7 +518,7 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
     import numpy as np
     import yaml
     from src.capture import ScreenCapture
-    from src.vision import MinimapLocator, PlayerTracker
+    from src.vision import MinimapLocator, PlayerTracker, PlayerAnchor
     from src.vision.monster import MonsterDetector
     from tools.hold_and_wiggle import (_send_key, _find_window, _foreground,
                                        _PhysicalKeys, _right_click_at, _pressed, _VK)
@@ -514,6 +541,22 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
     cap = ScreenCapture(backend="mss", window_title=cfg["window"]["title"])
     mmloc = MinimapLocator(cfg["vision"]["minimap"])
     tracker = PlayerTracker()
+    # 怪物偵測（模板匹配）——找怪是本工具的核心任務
+    mon_cfg = cfg["vision"]["monster"]
+    mondet = MonsterDetector(mon_cfg)
+    mondet.load_templates()
+    y_band = cfg.get("combat", {}).get("attack_y_band") or [-60, 60]
+    mon_every = float(mon_cfg.get("detect_interval", 0.7))
+    mon_state = {"t": 0.0, "left": 0, "right": 0}
+    # 角色螢幕定位：鏡頭夾邊時角色不在畫面中央（實測偏移 56×182px），
+    # 用名牌模板定位才能正確判斷「怪在左邊還右邊 / 是不是同一層」。
+    pa_cfg = cfg.get("vision", {}).get("player_anchor") or {}
+    anchor = PlayerAnchor(
+        template_path=os.path.join(ROOT, pa_cfg.get(
+            "template", "assets/templates/player/nametag.png")),
+        feet_offset_y=pa_cfg.get("feet_offset_y", 6),
+        threshold=pa_cfg.get("match_threshold", 0.75))
+    log("角色定位：" + ("名牌模板可用" if anchor.available else "找不到名牌模板 → 退回畫面中央"))
     hwnd = _find_window(cfg["window"]["title"])
     if not hwnd:
         log("找不到遊戲視窗，結束")
@@ -577,6 +620,27 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
         if prev_exp[0] is not None:
             w.exp_changed = float(np.abs(cur - prev_exp[0]).mean()) > 1.5
         prev_exp[0] = cur
+        # 找怪：以「角色真實螢幕位置」為原點，數左右兩側同一層的怪
+        if now - mon_state["t"] >= mon_every:
+            mon_state["t"] = now
+            try:
+                h, wpx = frame.shape[:2]
+                ap = anchor.find(frame) if anchor.available else None
+                axm, aym = ap if ap else (wpx // 2, h // 2)
+                lo, hi = y_band
+                left = right = 0
+                for d in mondet.detect(frame):
+                    # 用「怪的底部」對齊「角色腳底」判斷是否同一層
+                    if not (lo <= (d.y + d.h) - aym <= hi):
+                        continue          # 別層的怪，箭是水平飛的射不到
+                    if d.center[0] < axm:
+                        left += 1
+                    else:
+                        right += 1
+                mon_state["left"], mon_state["right"] = left, right
+            except Exception:
+                pass
+        w.mon_left, w.mon_right = mon_state["left"], mon_state["right"]
         w.user_touch = phys.ok and any(
             phys.state.get(v, False) for v in (0x25, 0x26, 0x27, 0x28))
         try:
@@ -630,6 +694,8 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
             tap_key("alt", 0.05)
         elif a.verb == "step":
             tap_key(a.arg[0], a.arg[1])
+        elif a.verb == "turn":
+            tap_key(a.arg, 0.03)      # 極短按：只轉身不走路
         elif a.verb == "release_moves":
             for k in ("left", "right"):
                 _send_key(k, keyup=True)
@@ -641,8 +707,14 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
         elif a.verb == "log":
             log(str(a.arg))
 
+    heal_mode = cfg.get("survival", {}).get("heal_mode", "self")
     core = NightWatchCore(max_seconds=max_seconds,
-                          potion_key=cfg["keys"].get("hp_potion", "delete"))
+                          potion_key=cfg["keys"].get("hp_potion", "delete"),
+                          heal_mode=heal_mode,
+                          last_resort_hp=float(cfg.get("survival", {})
+                                               .get("last_resort_hp", 0.20)))
+    log(f"補血模式：{heal_mode}"
+        + ("（寵物/使用者負責，核心不碰藥水鍵）" if heal_mode == "external" else ""))
     f0 = cap.grab()
     if f0 is None or not locate_hp(f0):
         log("HP 條定位失敗（core 將因 hp=None 進入安全模式）")

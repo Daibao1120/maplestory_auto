@@ -5,6 +5,7 @@ from src.vision.minimap import (MinimapLocator, PlayerTracker, Rect,
 from src.vision.health_bar import HealthBarDetector
 from src.vision.monster import MonsterDetector, Detection
 from src.vision.edge_probe import probe_ahead_safe
+from src.vision.player_anchor import PlayerAnchor, search_window
 from src.vision.synthetic import build_demo, DemoScene
 
 __all__ = [
@@ -13,5 +14,6 @@ __all__ = [
     "HealthBarDetector",
     "MonsterDetector", "Detection",
     "probe_ahead_safe",
+    "PlayerAnchor", "search_window",
     "build_demo", "DemoScene",
 ]

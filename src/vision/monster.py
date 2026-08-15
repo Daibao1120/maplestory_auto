@@ -53,7 +53,12 @@ class MonsterDetector:
         self.threshold = float(config.get("match_threshold", 0.75))
         self.roi = config.get("roi")
         self.iou_thresh = float(config.get("nms_iou", 0.30))
+        # 降取樣加速：畫面與模板同時縮小再匹配，座標回放大。實測 2736 寬畫面
+        # scale=0.6 速度快 3 倍而最佳分數幾乎不變（0.65 vs 0.66）；0.5 會掉到 0.57。
+        self.scale = float(config.get("scale", 1.0))
+        self.skip = set(config.get("skip_templates") or ())
         self._templates: Dict[str, "np.ndarray"] = {}
+        self._scaled: Dict[str, "np.ndarray"] = {}
         self._loaded = False
 
     # ---- 模板 ----
@@ -95,19 +100,36 @@ class MonsterDetector:
         region, ox, oy = self._crop(frame)
         if region.size == 0:
             return []
+        s = self.scale if 0.1 < self.scale < 1.0 else 1.0
+        if s != 1.0:
+            region = cv2.resize(region, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
         rh, rw = region.shape[:2]
 
         dets: List[Detection] = []
         for name, tmpl in self._templates.items():
-            th, tw = tmpl.shape[:2]
+            if name in self.skip:
+                continue
+            t = self._scaled_template(name, tmpl, s)
+            th, tw = t.shape[:2]
             if rh < th or rw < tw:
                 continue
-            res = cv2.matchTemplate(region, tmpl, cv2.TM_CCOEFF_NORMED)
+            res = cv2.matchTemplate(region, t, cv2.TM_CCOEFF_NORMED)
             ys, xs = np.where(res >= self.threshold)
             for x, y in zip(xs, ys):
-                dets.append(Detection(name, int(x) + ox, int(y) + oy, tw, th, float(res[y, x])))
+                dets.append(Detection(name, int(x / s) + ox, int(y / s) + oy,
+                                      int(tw / s), int(th / s), float(res[y, x])))
 
         return self._nms(dets, self.iou_thresh)
+
+    def _scaled_template(self, name, tmpl, s):
+        if s == 1.0:
+            return tmpl
+        key = f"{name}@{s}"
+        cached = self._scaled.get(key)
+        if cached is None:
+            cached = cv2.resize(tmpl, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+            self._scaled[key] = cached
+        return cached
 
     # ---- 內部 ----
     def _crop(self, frame):
