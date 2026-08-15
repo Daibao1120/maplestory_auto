@@ -736,9 +736,17 @@ class HoldWiggle:
             return 1
         self._hwnd = hwnd
         self._window_keyword = window_keyword
-        if not self.dry_run and not _foreground(hwnd):
-            print("[錯誤] 無法把遊戲切到前景，按鍵不會生效。")
-            return 1
+        if not self.dry_run:
+            fg_ok = False
+            for _ in range(5):     # UAC 彈窗剛關/焦點鎖時第一次常失敗，多試幾次
+                if _foreground(hwnd):
+                    fg_ok = True
+                    break
+                time.sleep(0.8)
+            if not fg_ok:
+                # 不再直接退出：主迴圈本來就會等遊戲回到前景才送鍵
+                print("[警告] 暫時無法把遊戲切到前景 → 照常啟動；"
+                      "請自行點一下遊戲視窗，偵測到前景後會自動開始。")
 
         # edge-guard：建立擷取/定位器，記下起始 x 當中心、設安全左右界。
         # 啟動時抓不到玩家點（小地圖沒開/在切圖）不放棄——之後每次挪步前重試。
