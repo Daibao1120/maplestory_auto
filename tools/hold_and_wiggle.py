@@ -144,15 +144,25 @@ class _PhysicalKeys:
 
         HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
                                       wt.WPARAM, wt.LPARAM)
+        # 64 位元下必須明確宣告簽章：預設把指標當 32 位元 int 傳會 OverflowError
+        _user32.SetWindowsHookExW.restype = ctypes.c_void_p
+        _user32.SetWindowsHookExW.argtypes = (ctypes.c_int, HOOKPROC,
+                                              wt.HINSTANCE, wt.DWORD)
+        _user32.CallNextHookEx.restype = ctypes.c_ssize_t
+        _user32.CallNextHookEx.argtypes = (ctypes.c_void_p, ctypes.c_int,
+                                           wt.WPARAM, wt.LPARAM)
 
         def proc(n_code, w_param, l_param):
-            if n_code >= 0:
-                kb = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                if not (kb.flags & self._LLKHF_INJECTED) and kb.vkCode in self.state:
-                    if w_param in self._WM_DOWN:
-                        self.state[kb.vkCode] = True
-                    elif w_param in self._WM_UP:
-                        self.state[kb.vkCode] = False
+            try:
+                if n_code >= 0:
+                    kb = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                    if not (kb.flags & self._LLKHF_INJECTED) and kb.vkCode in self.state:
+                        if w_param in self._WM_DOWN:
+                            self.state[kb.vkCode] = True
+                        elif w_param in self._WM_UP:
+                            self.state[kb.vkCode] = False
+            except Exception:
+                pass  # 鉤子 callback 絕不能拋例外（會拖慢全系統鍵盤）
             return _user32.CallNextHookEx(None, n_code, w_param, l_param)
 
         self._proc = HOOKPROC(proc)
