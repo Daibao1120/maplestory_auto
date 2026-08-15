@@ -61,14 +61,16 @@ REM   --edge-margin 6         safe range = start x +/- this many minimap pixels.
 REM                           SMALLER for a narrower platform.
 REM   --patrol-steps 1        blind fallback only (used when --edge-guard is off /
 REM                           unavailable): steps to one side before turning back.
-REM   --face left             STARTING attack side assumption. Each patrol step
-REM                           now SWITCHES the attack side and keeps attacking
-REM                           that side until the next step (~45-55s per side) --
-REM                           standing-still attacks go stale unless you both
-REM                           move a little AND actually change sides. Add
-REM                           --fixed-face to keep one side, or --swap-every 2
-REM                           to switch every 2nd step. Manual side switching
-REM                           (arrow to pause, turn, Ctrl to resume) still works.
+REM   --face left             starting attack side assumption; it does NOT
+REM                           force-turn at launch.
+REM   --fixed-face            ON here: the tool NEVER switches sides on its own
+REM                           (user preference: auto side-switching felt wrong).
+REM                           YOU control the side: arrow key to pause, turn,
+REM                           Ctrl to resume -- it then keeps attacking that
+REM                           side. Remove this flag to let each patrol step
+REM                           alternate sides again.
+REM   --no-smart-face         ON here: motion-based "attack where monsters are"
+REM                           disabled, per user preference. Remove to re-enable.
 REM   --interval-min 40       shortest gap between patrol steps (seconds).
 REM   --interval-max 55       Attacks go stale after ~60s standing still, so it
 REM                           repositions once before that. No need to move often.
@@ -92,7 +94,7 @@ REM                           the only walking left is the edge-guard pushing
 REM                           you back to center when monsters knock you away.
 REM                           REMOVE this flag on wide flat maps if you prefer
 REM                           the small patrol steps.
-%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --edge-guard --edge-margin 4 --jump-in-place --dispel-buff --face left --interval-min 40 --interval-max 55 --no-refocus
+%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.18 --edge-guard --edge-margin 4 --jump-in-place --dispel-buff --face left --fixed-face --no-smart-face --interval-min 40 --interval-max 55 --no-refocus
 
 echo.
 echo Finished. Press any key to close.

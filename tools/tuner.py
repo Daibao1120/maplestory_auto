@@ -40,8 +40,8 @@ PARAMS = [
     ("edge_margin", "小地圖安全界（起始點 ± px）", 6, int),
     ("guard_interval", "位置警衛巡界間隔（秒；出界立即推回）", 2.5, float),
     ("swap_every", "每幾次挪步換邊（輪流模式）", 1, int),
-    ("alternate_face", "沒偵測到怪時輪流換邊 (1/0)", 1, int),
-    ("smart_face", "哪邊怪多打哪邊 (1/0)", 1, int),
+    ("alternate_face", "挪步時輪流換邊 (1/0)", 0, int),
+    ("smart_face", "哪邊怪多打哪邊 (1/0)", 0, int),
     ("dispel_interval", "buff 檢查間隔（秒）", 5.0, float),
 ]
 
@@ -284,7 +284,10 @@ def main():
     row = 1
     for key, label, default, cast in PARAMS:
         ttk.Label(frm, text=label).grid(column=0, row=row, sticky="w")
-        var = tk.StringVar(value=str(saved.get(key, default)))
+        val = saved.get(key, default)
+        if isinstance(val, bool):   # 布林顯示成 1/0，存檔時才不會解析失敗
+            val = int(val)
+        var = tk.StringVar(value=str(val))
         ttk.Entry(frm, textvariable=var, width=10).grid(column=1, row=row, sticky="e")
         entries[key] = (var, cast)
         row += 1
