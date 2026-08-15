@@ -94,7 +94,12 @@ REM                           branch platforms are safe. The outbound leg goes
 REM                           toward the platform center first, and the return
 REM                           leg is slightly shorter, so each shuffle nudges
 REM                           you back toward center.
-%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.12 --move-time 0.18 --edge-guard --edge-margin 4 --shuffle --dispel-buff --face left --fixed-face --no-smart-face --interval-min 40 --interval-max 55 --no-refocus
+REM ---- CURRENT SETUP: NO automatic movement at all (user decision) ----
+REM The tool ONLY: spams the attack key + auto right-clicks away unwanted buffs.
+REM YOU handle all movement/repositioning yourself (arrow keys pause it, hold
+REM Ctrl to resume attacking). Note: standing still ~60s stales attacks -- take
+REM a small step yourself once in a while.
+%PYCMD% tools\hold_and_wiggle.py --key ctrl --hold-attack --no-move --dispel-buff --face left --fixed-face --no-smart-face --no-refocus
 
 echo.
 echo Finished. Press any key to close.

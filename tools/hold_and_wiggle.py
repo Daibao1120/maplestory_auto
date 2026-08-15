@@ -238,7 +238,7 @@ class HoldWiggle:
     POLL = 0.03  # 秒；輪詢間隔
 
     def __init__(self, attack_key="ctrl", interval_min=35.0, interval_max=50.0,
-                 move_time=0.18, attack_interval=0.22, patrol_steps=2,
+                 move_time=0.18, attack_interval=0.22, hold_attack=False, patrol_steps=2,
                  attack_facing="left", enable_move=True, refocus=True,
                  jump_in_place=False, jump_key="alt",
                  edge_guard=False, edge_margin=6,
@@ -250,6 +250,12 @@ class HoldWiggle:
         self.interval_max = float(interval_max)
         self.move_time = float(move_time)          # 每步按住方向鍵秒數（越小步伐越小）
         self.attack_interval = float(attack_interval)  # 兩次攻擊點擊的間隔（秒）
+        # 按住攻擊：壓著不放（遊戲按住連打的最大輸出），每 2~4 秒快速鬆壓
+        # 補一下——單次 SendInput keydown 不會 auto-repeat，遊戲偶爾會把
+        # 按住狀態吃掉（「打一陣子就停」），定期補壓就不會斷
+        self.hold_attack = hold_attack
+        self._atk_held = False
+        self._atk_refresh = 0.0
         self.patrol_steps = max(1, int(patrol_steps))  # 從中心往單邊最多走幾步就折返
         self.attack_facing = attack_facing          # 固定攻擊方向（left/right）；移動後轉回這邊
         self.enable_move = enable_move              # False = 完全不移動，只連點攻擊
@@ -354,6 +360,24 @@ class HoldWiggle:
         """點一下攻擊鍵。連續呼叫 = 連續攻擊，比『按住不放』可靠——
         不管遊戲是『按一下打一下』還是『按住連打』都吃得到，移動後也能無縫接回。"""
         self._tap(self.attack_key, hold=random.uniform(0.04, 0.09))
+
+    def _attack_hold_tick(self, now):
+        """按住模式：壓著攻擊鍵；到補壓時間就快速鬆壓一次（防按住狀態被吃掉）。"""
+        if not self._atk_held:
+            self._down(self.attack_key)
+            self._atk_held = True
+            self._atk_refresh = now + random.uniform(2.0, 4.0)
+        elif now >= self._atk_refresh:
+            self._up(self.attack_key)
+            time.sleep(0.03)
+            self._down(self.attack_key)
+            self._atk_refresh = now + random.uniform(2.0, 4.0)
+
+    def _attack_release(self):
+        """放開按住的攻擊鍵（暫停/切視窗/移動前必呼叫，絕不卡著 Ctrl）。"""
+        if self._atk_held:
+            self._up(self.attack_key)
+            self._atk_held = False
 
     def _reface(self, face=None):
         """把面向定到指定方向（極短按，只轉身不走路）。未指定 = 目前攻擊方向。"""
@@ -774,6 +798,7 @@ class HoldWiggle:
         """
         if not self.enable_move:
             return
+        self._attack_release()   # 走位前放開攻擊鍵，避免 Ctrl+方向鍵組合
         # edge-guard 想開卻還沒開成（啟動時小地圖沒就緒）→ 每次挪步前重試
         if self._edge_guard_wanted and not self.edge_guard:
             self._try_enable_edge_guard(retries=3)
@@ -914,8 +939,10 @@ class HoldWiggle:
         else:
             move_desc = "不移動" if not self.enable_move else \
                 f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，{swap_desc}）"
+        atk_desc = (f"按住「{self.attack_key}」攻擊（每 2~4 秒補壓防斷）" if self.hold_attack
+                    else f"連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）")
         print("=" * 56)
-        print(f" 連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
+        print(f" {atk_desc}；{move_desc}")
         print(f" 接手換邊=方向鍵暫停→轉向→Ctrl恢復 | 結束=F12")
         if self.dry_run:
             print(" [dry-run] 只印節奏、不送實體按鍵")
@@ -942,6 +969,7 @@ class HoldWiggle:
                     self._maybe_reload_tuning()   # 調參 UI 改了值就即時套用
                     if self._user_intervened():
                         state = "PAUSED"
+                        self._attack_release()   # 你接手時絕不卡著攻擊鍵
                         self._pending_face = self._user_direction() or self._pending_face
                         print("  ⏸ 你接手了 → 暫停攻擊。轉到你要打的方向後按 Ctrl 恢復"
                               "（會朝你最後面對的那邊打）…")
@@ -962,6 +990,7 @@ class HoldWiggle:
                             ok = self._ensure_foreground()
                             self._was_fg = ok
                             if not ok:
+                                self._attack_release()   # 切不回去就先放開攻擊鍵
                                 time.sleep(0.15)
                                 continue
                             print("  ✓ 已切回楓之谷，繼續攻擊")
@@ -969,6 +998,7 @@ class HoldWiggle:
                             # 不搶焦點：完全不送鍵、讓開。焦點離開『超過 focus_grace 秒』
                             # 才當成你真的切走並印訊息——短暫閃一下的視窗(bun/通知)直接忽略，
                             # 因為分不出是誰搶的焦點，就用『有沒有離開夠久』來判斷。
+                            self._attack_release()   # 你切走打字時絕不按著 Ctrl（避免組合鍵）
                             now = time.time()
                             if self._fg_lost_at is None:
                                 self._fg_lost_at = now
@@ -1019,6 +1049,8 @@ class HoldWiggle:
                         wait = self._next_interval()
                         self._next_attack = 0.0  # 移動後立刻接回攻擊（下一圈馬上點）
                         print(f"  （下次移動：{wait:.0f} 秒後）")
+                    elif self.hold_attack:
+                        self._attack_hold_tick(now)
                     elif now >= self._next_attack:
                         self._attack_once()
                         # 攻擊間隔帶抖動、偶爾停頓一下——人不會用碼表點鍵
@@ -1083,6 +1115,9 @@ def parse_args(argv=None):
                    help="攻擊鍵（預設 ctrl）；會被連續點擊")
     p.add_argument("--attack-interval", type=float, default=0.22,
                    help="兩次攻擊點擊的間隔秒數（預設 0.22，越小打越快）")
+    p.add_argument("--hold-attack", action="store_true",
+                   help="攻擊鍵改『按住不放』（遊戲按住連打的最大輸出），每 2~4 秒快速"
+                        "鬆壓補一下防止按住狀態被遊戲吃掉；暫停/切視窗/移動前都會放開")
     p.add_argument("--interval-min", type=float, default=35.0,
                    help="兩次巡邏移動之間最短秒數（預設 35）；定點約 60 秒攻擊才會失效，故不用太頻繁")
     p.add_argument("--interval-max", type=float, default=50.0,
@@ -1141,7 +1176,8 @@ def main(argv=None):
     args = parse_args(argv)
     hw = HoldWiggle(attack_key=args.key, interval_min=args.interval_min,
                     interval_max=args.interval_max, move_time=args.move_time,
-                    attack_interval=args.attack_interval, patrol_steps=args.patrol_steps,
+                    attack_interval=args.attack_interval, hold_attack=args.hold_attack,
+                    patrol_steps=args.patrol_steps,
                     attack_facing=args.face, enable_move=not args.no_move,
                     refocus=not args.no_refocus, jump_in_place=args.jump_in_place,
                     shuffle=args.shuffle,
