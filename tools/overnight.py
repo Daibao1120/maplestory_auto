@@ -34,7 +34,9 @@ Action 動詞（執行殼契約，一個都不能漏）：
 """
 from __future__ import annotations
 
+import os
 import random
+import time
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -512,6 +514,177 @@ class NightWatchCore:
         if self._next_repos is not None and w.now >= self._next_repos:
             self._next_repos = w.now + self.rng.uniform(*self.IDLE_JUMP_EVERY)
             acts.append(Action("tap_jump"))
+
+
+def exp_per_hour(events, now, window=900.0):
+    """由 EXP 進帳時間戳估算「每小時進帳次數」（純函式，可測試）。
+
+    events: 遞增的時間戳清單；只看最近 window 秒內的事件。
+    不足 60 秒的觀察不外推（回 0.0），避免開場數字亂跳。
+    """
+    if not events:
+        return 0.0
+    recent = [t for t in events if now - t <= window]
+    if len(recent) < 2:
+        return 0.0
+    span = now - recent[0]
+    if span < 60.0:
+        return 0.0
+    return len(recent) * 3600.0 / span
+
+
+class Perception:
+    """感知層（截圖＋辨識）→ WorldState；控制台與守夜 daemon 共用。
+
+    只負責「看」，不送任何按鍵；所有安全決策都在 NightWatchCore。
+    """
+
+    def __init__(self, cfg, root_dir):
+        import numpy as np
+        from src.capture import ScreenCapture
+        from src.vision import MinimapLocator, PlayerTracker, PlayerAnchor
+        from src.vision.monster import MonsterDetector
+        self._np = np
+        self.cfg = cfg
+        v = cfg["vision"]
+        self.cap = ScreenCapture(backend="mss", window_title=cfg["window"]["title"])
+        self.mm = MinimapLocator(v["minimap"])
+        self.tracker = PlayerTracker()
+        pa = v.get("player_anchor") or {}
+        self.anchor = PlayerAnchor(
+            template_path=os.path.join(root_dir, pa.get(
+                "template", "assets/templates/player/nametag.png")),
+            feet_offset_y=pa.get("feet_offset_y", 6),
+            threshold=pa.get("match_threshold", 0.75))
+        self.mondet = MonsterDetector(v["monster"])
+        self.mondet.load_templates()
+        self.y_band = cfg.get("combat", {}).get("attack_y_band") or [-60, 60]
+        self.mon_every = float(v["monster"].get("detect_interval", 0.7))
+        self.buffdet = None
+        self._mon_t = 0.0
+        self._mon = []
+        self._prev_exp = None
+        self._hp = {}
+        self.exp_events = []
+
+    # ---- HP 條 ----
+    @staticmethod
+    def _red(crop):
+        b = crop[:, :, 0].astype(int)
+        g = crop[:, :, 1].astype(int)
+        r = crop[:, :, 2].astype(int)
+        return (r > 150) & (r - g > 60) & (r - b > 60)
+
+    def locate_hp(self, frame):
+        m = self._red(frame[1540:1596, 560:1300])
+        best = (0, 0, 0)
+        for y in range(m.shape[0]):
+            n = st = 0
+            for i, v in enumerate(m[y]):
+                if v:
+                    if n == 0:
+                        st = i
+                    n += 1
+                    if n > best[0]:
+                        best = (n, st, y)
+                else:
+                    n = 0
+        L, s, y = best
+        if L < 40:
+            return False
+        self._hp = {"roi": (1540 + y - 4, 1540 + y + 5, 560 + s - 2,
+                            min(1300, 560 + s + int(L / 0.89) + 10)),
+                    "full": int(L / 0.89)}
+        return True
+
+    def snapshot(self, now, cmd=""):
+        """回傳 (WorldState, frame, info)。frame 可能為 None（抓不到畫面）。"""
+        np = self._np
+        try:
+            frame = self.cap.grab()
+        except Exception:
+            frame = None
+        w = WorldState(now=now, cmd=cmd)
+        info = {"anchor": None, "monsters": [], "anchor_score": 0.0,
+                "same_layer": 0, "exp_per_hour": 0.0}
+        if frame is None or float(frame.mean()) < 3:
+            w.frame_ok = False
+            return w, frame, info
+
+        pos = self.tracker.update(self.mm.locate_player_candidates(frame))
+        w.pos = pos
+        w.span = self.mm.platform_span(frame, pos) if pos else None
+        if not self._hp:
+            self.locate_hp(frame)
+        if self._hp:
+            y1, y2, x1, x2 = self._hp["roi"]
+            wred = self._red(frame[y1:y2, x1:x2]).any(axis=0).sum()
+            w.hp = float(wred) / max(1, self._hp["full"])
+
+        # EXP 變化（同時記錄時間戳供估算每小時進帳）
+        crop = frame[1520:1556, 1020:1280].astype(np.int16)
+        if self._prev_exp is not None:
+            if float(np.abs(crop - self._prev_exp).mean()) > 1.5:
+                w.exp_changed = True
+                self.exp_events.append(now)
+                if len(self.exp_events) > 4000:
+                    del self.exp_events[:2000]
+        self._prev_exp = crop
+        info["exp_per_hour"] = exp_per_hour(self.exp_events, now)
+
+        # 找怪（節流）
+        if now - self._mon_t >= self.mon_every:
+            self._mon_t = now
+            try:
+                self._mon = self.mondet.detect(frame)
+            except Exception:
+                self._mon = []
+        ap = self.anchor.find(frame) if self.anchor.available else None
+        info["anchor"], info["anchor_score"] = ap, self.anchor.last_score
+        h, wpx = frame.shape[:2]
+        axm, aym = ap if ap else (wpx // 2, h // 2)
+        lo, hi = self.y_band
+        left = right = 0
+        for d in self._mon:
+            same = lo <= (d.y + d.h) - aym <= hi
+            info["monsters"].append((d.x, d.y, d.w, d.h, d.score, same))
+            if same:
+                if d.center[0] < axm:
+                    left += 1
+                else:
+                    right += 1
+        w.mon_left, w.mon_right = left, right
+        info["same_layer"] = left + right
+        return w, frame, info
+
+    def find_buff(self, frame):
+        from src.vision.monster import MonsterDetector
+        if frame is None:
+            return None
+        try:
+            if self.buffdet is None:
+                h, wpx = frame.shape[:2]
+                bd = (self.cfg["vision"].get("buff_dispel") or {})
+                self.buffdet = MonsterDetector({
+                    "template_dir": bd.get("template_dir", "assets/templates/buffs"),
+                    "match_threshold": bd.get("match_threshold", 0.80),
+                    "roi": [int(wpx * 0.55), 0, wpx - int(wpx * 0.55), int(h * 0.25)],
+                    "nms_iou": 0.3})
+                self.buffdet.load_templates()
+            dets = self.buffdet.detect(frame)
+            if dets:
+                win = self.cap.locate_window()
+                ox, oy = (win.left, win.top) if win else (0, 0)
+                return (ox + dets[0].center[0], oy + dets[0].center[1])
+        except Exception:
+            pass
+        return None
+
+    def close(self):
+        try:
+            self.cap.close()
+        except Exception:
+            pass
 
 
 # ============================================================
