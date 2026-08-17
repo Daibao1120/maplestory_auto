@@ -125,6 +125,45 @@ def test_farm_faces_the_side_with_more_monsters():
     assert c.facing == "right"
 
 
+def test_exp_feedback_flips_facing_when_no_gain():
+    # 沒有怪物偵測資訊時，靠經驗值回饋換邊（不依賴角色螢幕座標）
+    c = NightWatchCore(heal_mode="external")
+    c.tick(W(0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    c.tick(W(1.0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    assert c.state == "FARM"
+    c.tick(W(2.0, hp=0.9, pos=(50, 90), span=SPAN(), exp_changed=True))
+    before = c.facing
+    t = 2.0 + NightWatchCore.EXP_FLIP_AFTER + 1
+    acts = c.tick(W(t, hp=0.9, pos=(50, 90), span=SPAN()))
+    turns = [a.arg for a in acts if a.verb == "turn"]
+    assert turns and c.facing != before               # 沒進帳 → 換邊
+    # 換邊後給完整觀察窗，不會每圈亂翻
+    acts = c.tick(W(t + 2, hp=0.9, pos=(50, 90), span=SPAN()))
+    assert not any(a.verb == "turn" for a in acts)
+
+
+def test_exp_feedback_keeps_facing_while_gaining():
+    c = NightWatchCore(heal_mode="external")
+    c.tick(W(0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    c.tick(W(1.0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    t = 2.0
+    for _ in range(20):                               # 一直有經驗值 → 不換邊
+        acts = c.tick(W(t, hp=0.9, pos=(50, 90), span=SPAN(), exp_changed=True))
+        assert not any(a.verb == "turn" for a in acts)
+        t += 10.0
+    assert c.state == "FARM"
+
+
+def test_monster_detection_overrides_exp_feedback():
+    # 有怪物偵測資訊時以它為準（更即時）
+    c = NightWatchCore(heal_mode="external")
+    c.tick(W(0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    c.tick(W(1.0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    t = 2.0 + NightWatchCore.EXP_FLIP_AFTER + 1
+    acts = c.tick(W(t, hp=0.9, pos=(50, 90), span=SPAN(), mon_left=5, mon_right=0))
+    assert [a.arg for a in acts if a.verb == "turn"] == ["left"]
+
+
 def test_turn_is_rate_limited():
     c = NightWatchCore(heal_mode="external")
     c.tick(W(0, hp=0.9, pos=(50, 90), span=SPAN(20)))

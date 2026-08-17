@@ -50,14 +50,17 @@ class PlayerAnchor:
     """
 
     def __init__(self, template_path=None, feet_offset_y=6, threshold=0.75,
-                 search_radius=420):
+                 search_radius=420, part_threshold=0.70):
         self.template_path = template_path
         self.feet_offset_y = int(feet_offset_y)
         self.threshold = float(threshold)
+        self.part_threshold = float(part_threshold)
         self.search_radius = int(search_radius)
         self._tmpl = None
+        self._parts = []          # [(模板, 該模板左緣→名牌中心的 dx, 門檻)]
         self._prev: Optional[Tuple[int, int]] = None
         self.last_score = 0.0
+        self.last_part = ""
 
     def load(self):
         if self._tmpl is not None or not _CV_AVAILABLE:
@@ -66,33 +69,59 @@ class PlayerAnchor:
         if not p or not os.path.exists(p):
             return False
         img = cv2.imdecode(np.fromfile(p, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return False
         self._tmpl = img
-        return img is not None
+        # 抗遮擋：名牌常被鄰近玩家的名牌壓住一半（實機發生過），所以除了
+        # 完整名牌，也保留左半／右半當備援——任一半配上就能定位。
+        h, w = img.shape[:2]
+        half = max(8, w // 2)
+        self._parts = [
+            ("full", img, w / 2.0, self.threshold),
+            ("left", img[:, :half], w / 2.0, self.part_threshold),
+            ("right", img[:, w - half:], w - half - (w - half) + w / 2.0 - (w - half),
+             self.part_threshold),
+        ]
+        # 右半：匹配到的 x 是「名牌左緣 + (w-half)」→ 中心 dx = w/2 - (w-half)
+        self._parts[2] = ("right", img[:, w - half:], w / 2.0 - (w - half),
+                          self.part_threshold)
+        return True
 
     @property
     def available(self):
         return self.load()
 
     def find(self, frame):
-        """回傳角色腳底 (x, y)；找不到回傳 None。"""
+        """回傳角色腳底 (x, y)；找不到回傳 None。
+
+        依序試「完整名牌 → 左半 → 右半」，任一過門檻即採用（抗部分遮擋）。
+        """
         if frame is None or not self.load():
             return None
         h, w = frame.shape[:2]
-        th, tw = self._tmpl.shape[:2]
         x1, y1, x2, y2 = search_window(self._prev, w, h, self.search_radius)
         region = frame[y1:y2, x1:x2]
-        if region.shape[0] <= th or region.shape[1] <= tw:
-            x1, y1, x2, y2 = 0, 0, w, h
-            region = frame
-        res = cv2.matchTemplate(region, self._tmpl, cv2.TM_CCOEFF_NORMED)
-        _mn, mx, _ml, ml = cv2.minMaxLoc(res)
-        self.last_score = float(mx)
-        if mx < self.threshold:
-            if self._prev is not None:        # 局部搜尋失敗 → 全幀再試一次
+        best = None
+        for name, tmpl, center_dx, thr in self._parts:
+            th, tw = tmpl.shape[:2]
+            if region.shape[0] <= th or region.shape[1] <= tw:
+                continue
+            res = cv2.matchTemplate(region, tmpl, cv2.TM_CCOEFF_NORMED)
+            _mn, mx, _ml, ml = cv2.minMaxLoc(res)
+            if mx >= thr and (best is None or mx > best[1]):
+                best = (name, float(mx), ml, center_dx)
+            if name == "full" and mx >= thr:
+                break                        # 完整名牌命中就不必試半邊
+        if best is None:
+            self.last_score = 0.0
+            if self._prev is not None:       # 局部搜尋失敗 → 全幀再試一次
                 self._prev = None
                 return self.find(frame)
+            self.last_part = ""
             return None
-        cx = x1 + ml[0] + tw // 2
+        name, score, ml, center_dx = best
+        self.last_score, self.last_part = score, name
+        cx = int(x1 + ml[0] + center_dx)
         top = y1 + ml[1]
         self._prev = (cx, top)
         return (cx, top - self.feet_offset_y)

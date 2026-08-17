@@ -96,6 +96,10 @@ class NightWatchCore:
     YIELD_SECONDS = 45.0
     MAX_DESCENTS = 8
     EXP_STALL_LIMIT = 480.0
+    # 用「經驗值有沒有進帳」當回饋來決定面向：打得到怪就會有 EXP，久久沒進帳
+    # 就轉向另一邊試。這比幾何判斷可靠——不需要知道角色在畫面哪個像素，
+    # 而角色螢幕位置會隨鏡頭夾邊變動（實測不同地圖偏移 120~200px）。
+    EXP_FLIP_AFTER = 20.0
     IDLE_RECOVER_AFTER = 180.0    # IDLE_SAFE 待滿此秒數且條件乾淨 → 自動再試
     IDLE_CLEAN_NEED = 30.0        # 「乾淨」需持續的秒數
     IDLE_RECOVER_MAX = 4          # 一晚自動恢復次數上限
@@ -424,7 +428,8 @@ class NightWatchCore:
         if self._verify_hp0 is not None:
             return
 
-        # 面向怪多的那一側（模板偵測結果；平手/沒怪則維持現況）
+        # 決定面向：優先用怪物偵測（有明確一側就轉過去）；沒有偵測資訊時
+        # 改用經驗值回饋——久久沒進帳就換邊試（不依賴角色螢幕座標）。
         side = None
         if w.mon_left > w.mon_right:
             side = "left"
@@ -434,6 +439,14 @@ class NightWatchCore:
             self.facing = side
             self._last_turn = w.now
             acts.append(Action("turn", side))
+        elif (side is None
+              and w.now - self._last_exp_ts > self.EXP_FLIP_AFTER
+              and w.now - self._last_turn > self.EXP_FLIP_AFTER):
+            self.facing = "left" if self.facing == "right" else "right"
+            self._last_turn = w.now
+            self._last_exp_ts = w.now      # 給新方向一個完整的觀察窗
+            acts.append(Action("turn", self.facing))
+            acts.append(Action("log", f"沒有經驗值進帳 → 轉向{self.facing}試"))
 
         # 攻擊保持
         if not self._atk_held:
