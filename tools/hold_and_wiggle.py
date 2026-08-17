@@ -158,7 +158,7 @@ class HoldWiggle:
     QUIT_KEY = "f12"
     POLL = 0.03  # 秒；輪詢間隔
 
-    def __init__(self, attack_key="ctrl", interval_min=60.0, interval_max=80.0,
+    def __init__(self, attack_key="ctrl", interval_min=90.0, interval_max=100.0,
                  move_time=0.18, attack_interval=0.22, patrol_steps=2,
                  attack_facing="left", enable_move=True, refocus=True,
                  jump_in_place=False, jump_key="alt",
@@ -553,10 +553,10 @@ def parse_args(argv=None):
                    help="攻擊鍵（預設 ctrl）；會被連續點擊")
     p.add_argument("--attack-interval", type=float, default=0.22,
                    help="兩次攻擊點擊的間隔秒數（預設 0.22，越小打越快）")
-    p.add_argument("--interval-min", type=float, default=60.0,
-                   help="兩次巡邏移動之間最短秒數（預設 60）；定點約 90 秒攻擊才會失效，故越少移動越安全")
-    p.add_argument("--interval-max", type=float, default=80.0,
-                   help="兩次巡邏移動之間最長秒數（預設 80，留在 90 秒失效前 10 秒餘裕）；每次在 min~max 隨機")
+    p.add_argument("--interval-min", type=float, default=90.0,
+                   help="兩次巡邏移動之間最短秒數（預設 90）；90 秒以上才挪一次，越少移動越不會掉平台")
+    p.add_argument("--interval-max", type=float, default=100.0,
+                   help="兩次巡邏移動之間最長秒數（預設 100）；每次在 min~max 隨機")
     p.add_argument("--move-time", type=float, default=0.18,
                    help="每一步按住方向鍵秒數（預設 0.18）；太短(<0.1)角色只會轉身不走路")
     p.add_argument("--patrol-steps", type=int, default=2,
