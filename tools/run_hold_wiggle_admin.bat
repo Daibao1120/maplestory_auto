@@ -32,16 +32,17 @@ REM   --face left             starting attack direction ASSUMPTION. It does NOT
 REM                           force-turn at launch (keeps your character's current
 REM                           facing). When you manually switch sides in-game
 REM                           (arrow to pause, turn, Ctrl to resume) it follows you.
-REM   --interval-min 35       shortest gap between patrol steps (seconds).
-REM   --interval-max 50       Attacks go stale after ~60s standing still, so it
-REM                           repositions once before that. No need to move often.
+REM   --interval-min 60       shortest gap between patrol steps (seconds).
+REM   --interval-max 80       Attacks go stale after ~90s standing still, so it
+REM                           repositions once before that. Fewer moves = fewer
+REM                           chances to fall off, so keep this high.
 REM   --no-refocus            DEFAULT here. When you click away to another window
 REM                           (e.g. to type), it pauses and does NOT steal focus
 REM                           or send any keys into your window. Click back on
 REM                           MapleStory and it auto-resumes. REMOVE this flag if
 REM                           you instead want it to grab focus back on popups.
 REM   --no-move               add this to NOT move at all, just keep attacking
-"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.10 --edge-guard --edge-margin 6 --face left --interval-min 35 --interval-max 50 --no-refocus
+"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.10 --edge-guard --edge-margin 6 --face left --interval-min 60 --interval-max 80 --no-refocus
 
 echo.
 echo Finished. Press any key to close.
