@@ -42,7 +42,7 @@ REM                           or send any keys into your window. Click back on
 REM                           MapleStory and it auto-resumes. REMOVE this flag if
 REM                           you instead want it to grab focus back on popups.
 REM   --no-move               add this to NOT move at all, just keep attacking
-"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.10 --edge-guard --edge-margin 6 --face left --interval-min 90 --interval-max 100 --no-refocus
+"C:\Users\ibuzz\anaconda3\envs\linebot_RAG\python.exe" tools\hold_and_wiggle.py --key ctrl --attack-interval 0.22 --move-time 0.15 --edge-guard --edge-margin 6 --face left --interval-min 90 --interval-max 100 --no-refocus
 
 echo.
 echo Finished. Press any key to close.
