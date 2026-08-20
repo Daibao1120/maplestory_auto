@@ -438,27 +438,32 @@ def test_farm_reentry_after_long_idle_does_not_false_stall():
 
 
 def test_descend_budget_resets_per_episode():
-    c = NightWatchCore()
+    """每次進入 DESCEND 都有完整步數預算（不可跨回合累加而提早放棄）。
+
+    注意 tick 間隔要大於 DESCEND_STEP_EVERY——下降步驟之間會等角色落地。
+    """
+    step = NightWatchCore.DESCEND_STEP_EVERY + 0.1
+    c = NightWatchCore(heal_mode="external")
     c.tick(W(0, hp=0.99, pos=(50, 76), span=SPAN(3, 1, 2)))
     t = 1.0
     for _ in range(5):                                       # 第一回合用 5 步
         c.tick(W(t, hp=0.99, pos=(50, 78), span=SPAN(3, 1, 2)))
-        t += 1
+        t += step
     c.tick(W(t, hp=0.99, pos=(50, 94), span=SPAN(20)))       # 到寬平台
     assert c.state == "FARM"
-    c.tick(W(t + 1, hp=0.99, pos=(50, 94), span=SPAN(20), cmd="idle"))
-    c.tick(W(t + 2, hp=0.99, pos=(50, 94), span=SPAN(3, 1, 2), cmd="farm"))
+    t += step
+    c.tick(W(t, hp=0.99, pos=(50, 94), span=SPAN(20), cmd="idle"))
+    t += step
+    # external 補血模式下 VERIFY 會在同一圈直接轉 DESCEND
+    c.tick(W(t, hp=0.99, pos=(50, 94), span=SPAN(3, 1, 2), cmd="farm"))
     assert c.state == "DESCEND"
     moved = 0
-    for i in range(NightWatchCore.MAX_DESCENTS + 3):         # 第二回合有完整預算
-        acts = c.tick(W(t + 3 + i, hp=0.99, pos=(50, 94), span=SPAN(3, 1, 2)))
-        moved += sum(1 for a in acts if a.verb == "step")
+    for _ in range(NightWatchCore.MAX_DESCENTS):             # 第二回合有完整預算
+        t += step
+        moved += sum(1 for a in c.tick(W(t, hp=0.99, pos=(50, 94),
+                                         span=SPAN(3, 1, 2)))
+                     if a.verb == "step")
     assert moved == NightWatchCore.MAX_DESCENTS
-
-
-# ============================================================
-#  讓手（邊緣觸發）與環境安全（非空洞斷言）
-# ============================================================
 
 def test_user_touch_edge_triggered_once():
     c = make_farming_core()
@@ -634,3 +639,24 @@ def test_full_night_scenario_invariants():
     c.tick(W(4 * 3600 + 10, hp=0.9, pos=(50, 94), span=SPAN()))
     assert c.state == "STOPPED"
     assert not violations, violations
+
+
+def test_descend_waits_between_steps():
+    """下降步驟之間要等角色落地。
+
+    實跑觀察到 4.3 秒就把 8 步預算燒光（每圈 285ms 就送一步），然後誤判
+    「下不去」而放棄——角色其實還在空中。
+    """
+    c = NightWatchCore(heal_mode="external")
+    c.tick(W(0, hp=0.99, pos=(50, 76), span=SPAN(4, 1, 3)))
+    c.tick(W(0.5, hp=0.99, pos=(50, 76), span=SPAN(4, 1, 3)))
+    assert c.state == "DESCEND"
+    steps = 0
+    t = 1.0
+    for _ in range(12):                      # 12 圈 × 0.3 秒 = 3.6 秒
+        steps += sum(1 for a in c.tick(W(t, hp=0.99, pos=(50, 76),
+                                         span=SPAN(4, 1, 3)))
+                     if a.verb == "step")
+        t += 0.3
+    assert steps <= 3                        # 約每 1.6 秒一步，不是每圈一步
+    assert c.state == "DESCEND"              # 預算沒被燒光

@@ -96,3 +96,32 @@ def test_bar_reader_updates_full_when_bar_grows():
     r.calibrate(make_frame(hp_len=120)[0])
     r.read(make_frame(hp_len=200)[0])          # 升等後條變長
     assert r.full >= 190
+
+
+def test_bars_pair_accepts_partially_filled_mp():
+    """MP 沒滿時長度會比 HP 短很多——不可因此拒絕。
+
+    實機案例：HP 滿（196px）、MP 剩 56%（109px），舊的「長度需為 HP 的
+    0.6~1.6 倍」限制把正確的 MP 條擋掉，連帶整個 UI 校準判定失敗。
+    """
+    from src.vision.ui_calibrate import find_bars_pair
+    f, y = make_frame(hp_len=196, mp_len=109)
+    hp, mp = find_bars_pair(f)
+    assert hp and mp
+    assert abs(mp["x"] - 610) <= 3 and abs(mp["len"] - 109) <= 3
+
+
+def test_bars_pair_ignores_far_away_blue_ui():
+    """遠處的藍色 UI（聊天視窗、圖示）不可被當成 MP 條。"""
+    from src.vision.ui_calibrate import find_bars_pair
+    f, y = make_frame(hp_len=196, mp_len=0)
+    f[y - 5:y + 5, 1500:1750] = (230, 120, 40)      # 很遠的藍色區塊
+    hp, mp = find_bars_pair(f)
+    assert hp is not None and mp is None
+
+
+def test_bars_pair_returns_hp_even_without_mp():
+    from src.vision.ui_calibrate import find_bars_pair
+    f, _ = make_frame(hp_len=196, mp_len=0)
+    hp, mp = find_bars_pair(f)
+    assert hp is not None and mp is None

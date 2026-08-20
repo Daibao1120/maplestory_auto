@@ -71,6 +71,7 @@ def run(seconds=45.0, cfg_path=None):
         ok["怪物模板"] += bool(info.get("monsters"))
         ok["活動偵測"] += bool((info.get("motion") or {}).get("ready"))
         ok["彈窗誤報"] += bool(info.get("modal"))
+        ok["遇人"] += bool(info.get("others_near"))
         exp_events += bool(w.exp_changed)
         states[core.state] += 1
         for a in out:

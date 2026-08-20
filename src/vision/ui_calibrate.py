@@ -193,12 +193,16 @@ def exp_text_roi_from_bars(frame, hp, mp, text_h_frac=0.013):
     return (x, y, min(mp["len"] + int(w * 0.012), w - x), th + int(h * 0.004))
 
 
-def find_bars_pair(frame, bottom_frac=0.85):
+def find_bars_pair(frame, bottom_frac=0.85, max_gap_frac=0.15, min_ratio=0.08):
     """成對找 HP/MP 條，回傳 (hp, mp)。
 
-    只找「最長藍色段」會被聊天視窗等藍色 UI 騙（實測抓到 x=276 的聊天列）。
-    HP 紅色在畫面中較獨特，先鎖 HP，再要求 MP：同一列（±4px）、在 HP 右邊、
-    長度相近（0.6~1.6 倍）。這組幾何約束在實機穩定。
+    只找「最長藍色段」會被聊天視窗等藍色 UI 騙（實測抓到 x=276 的聊天列），
+    所以先鎖較獨特的紅色 HP，再用**位置**關係找 MP：同一列（±4px）、緊接在
+    HP 右側一段距離內、取最長的一段。
+
+    重點：不可用「長度比例」當條件——條的長度會隨當前值變動。實測 MP 只剩
+    56% 時長度僅 HP 的 0.56 倍，舊的 0.6~1.6 倍限制會直接把正確的 MP 條拒絕掉，
+    連帶讓整個 UI 校準失敗。實際滿值由 BarReader 在執行期自我學習。
     """
     if not _CV_AVAILABLE or frame is None:
         return None, None
@@ -209,12 +213,15 @@ def find_bars_pair(frame, bottom_frac=0.85):
     y0 = max(0, hp["y"] - 4)
     band = frame[y0:min(h, hp["y"] + 5)]
     m = _color_mask(band, "blue")
+    hp_end = hp["x"] + hp["len"]
+    limit = hp_end + int(w * max_gap_frac)
     best = None
     for yy in range(m.shape[0]):
         row = m[yy].copy()
-        row[:hp["x"] + hp["len"]] = False        # 只看 HP 條右側
+        row[:hp_end] = False                      # 只看 HP 條右側
+        row[limit:] = False                       # 太遠的藍色 UI 不是 MP 條
         L, st = longest_run(row)
-        if L and 0.6 * hp["len"] <= L <= 1.6 * hp["len"]:
+        if L >= max(6, int(hp["len"] * min_ratio)):
             if best is None or L > best[0]:
                 best = (L, st, y0 + yy)
     if best is None:

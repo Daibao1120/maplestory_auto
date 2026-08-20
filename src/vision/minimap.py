@@ -213,6 +213,45 @@ class MinimapLocator:
     def _too_big(self, area):
         return self.max_blob_area is not None and area > int(self.max_blob_area)
 
+    def other_player_dots(self, frame, s_min=200, v_min=230, max_area=60):
+        """回傳小地圖上「其他玩家」的紅點 [(x, y, area), ...]（校準尺度）。
+
+        實測確認：自己是黃點（H≈27-30），其他玩家是純紅十字（H≈0、S=255、
+        V=255），傳點/NPC 是青綠色（H≈97）——用色相就能乾淨區分。
+        紅色色相會繞回 179，故兩段都要判。
+        """
+        if not _CV_AVAILABLE or np is None or frame is None:
+            return []
+        region, sx, sy = self._crop_scaled(frame)
+        if region.size == 0:
+            return []
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        h, s_, v_ = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        red = (((h <= 8) | (h >= 172)) & (s_ >= s_min) & (v_ >= v_min))
+        mask = red.astype(np.uint8)
+        num, _l, stats, cents = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        out = []
+        for i in range(1, num):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            if 2 <= area <= max_area:
+                out.append((int(round(cents[i][0] / sx)),
+                            int(round(cents[i][1] / sy)), area))
+        return out
+
+    def others_near(self, frame, player_pos, dy_tol=3, dx_range=40):
+        """回傳「和我同一層、且在附近」的其他玩家數量。
+
+        只有站在我這層搶怪的才要緊；別層或遠處的玩家不影響。
+        """
+        if player_pos is None:
+            return 0
+        px, py = player_pos
+        n = 0
+        for x, y, _a in self.other_player_dots(frame):
+            if abs(y - py) <= dy_tol and abs(x - px) <= dx_range:
+                n += 1
+        return n
+
     def locate_others(self, frame):
         """回傳其他玩家標記的概略重心 (x, y)（校準尺度）；找不到回傳 None。"""
         if not _CV_AVAILABLE or np is None or frame is None:

@@ -62,6 +62,8 @@ class WorldState:
     mon_hint: Optional[str] = None
     # 置中彈窗（測謊/符文/死亡對話框）；偵測到就立刻零輸入等使用者處理
     modal: Optional[tuple] = None
+    # 同層附近的其他玩家人數（搶怪/被檢舉風險）
+    others_near: int = 0
 
 
 @dataclass
@@ -151,6 +153,9 @@ class NightWatchCore:
     IDLE_JUMP_EVERY = (240.0, 360.0)
     YIELD_SECONDS = 45.0
     MAX_DESCENTS = 8
+    # 下降步驟之間要等角色真的走出去並落地；不等的話每圈都送一步，
+    # 實測 4.3 秒就把 8 步預算燒光並誤判成「下不去」而放棄。
+    DESCEND_STEP_EVERY = 1.6
     EXP_STALL_LIMIT = 480.0
     # 用「經驗值有沒有進帳」當回饋來決定面向：打得到怪就會有 EXP，久久沒進帳
     # 就轉向另一邊試。這比幾何判斷可靠——不需要知道角色在畫面哪個像素，
@@ -164,6 +169,8 @@ class NightWatchCore:
     # 否則一次彈窗會讓整晚停擺（實測 90 秒觀察中出現 227 圈卡在靜默）。
     # 其他原因（EXP 停滯、補血失效）進入的靜默仍需人工處理，不自動恢復。
     MODAL_CLEAR_SECONDS = 45.0
+    # 遇人：同層附近出現其他玩家並持續這麼久 → 依設定反應（預設只記錄）
+    OTHERS_HOLD = 20.0
 
     # 快捷欄全鍵位：不知道藥水放哪一格就自己一個一個試（看 HP 有沒有回升），
     # 不必問使用者。第一個是設定檔給的鍵，其餘依序輪替。
@@ -211,6 +218,7 @@ class NightWatchCore:
         self._touch_active = False
         self._farm_y: Optional[int] = None
         self._descend_count = 0
+        self._last_descend = 0.0
         self._last_exp_ts: Optional[float] = None
         self._idle_entered = 0.0
         self._idle_hp0: Optional[float] = None
@@ -219,6 +227,9 @@ class NightWatchCore:
         self._last_turn = 0.0
         self._silent_reason = ""      # 進入 IDLE_SILENT 的原因（決定能否自動恢復）
         self._modal_gone_since: Optional[float] = None
+        self._others_since: Optional[float] = None
+        self.on_others = "log"        # log | idle —— 遇人時的反應
+        self.others_seen = False
         self._buff_due = {}          # 鍵 → 下次施放時間
         self._skill_ready = {}       # 技能鍵 → 下次可用時間
         self._next_tap = 0.0         # tap 模式的下一次攻擊時間
@@ -297,6 +308,9 @@ class NightWatchCore:
                                  f"（第 {self.stats.recoveries} 次）", w)
             return acts
 
+        # 遇人：同層附近有其他玩家（搶怪/被檢舉風險）
+        self._others_logic(w, acts)
+
         # 感知看門狗（FARM/DESCEND）
         self._sensor_watchdogs(w, acts)
 
@@ -349,6 +363,7 @@ class NightWatchCore:
             self._next_repos = w.now + self.rng.uniform(*self.REPOS_EVERY)
         elif state == "DESCEND":
             self._descend_count = 0           # 每回合獨立步數預算
+            self._last_descend = 0.0
         elif state in ("IDLE_SAFE", "IDLE_SILENT"):
             self._idle_entered = w.now
             self._idle_hp0 = w.hp
@@ -491,9 +506,12 @@ class NightWatchCore:
         if self._descend_count >= self.MAX_DESCENTS:
             self._to("IDLE_SAFE", acts, "本回合下降步數用盡", w)
             return
+        if w.now - self._last_descend < self.DESCEND_STEP_EVERY:
+            return                      # 等上一步走完並落地
         d = "left" if w.span["dist_left"] <= w.span["dist_right"] else "right"
         acts.append(Action("step", (d, 0.4)))
         acts.append(Action("release_moves"))
+        self._last_descend = w.now
         self._descend_count += 1
         self.stats.descents += 1
 
@@ -623,6 +641,22 @@ class NightWatchCore:
                 self._buff_due[key] = w.now + every
                 self.stats.buffs_cast += 1
                 return                           # 一圈只補一顆，避免連打一串
+
+    def _others_logic(self, w, acts):
+        """同層附近出現其他玩家時的反應（預設只記錄，可設定成停手）。"""
+        if w.others_near <= 0:
+            self._others_since = None
+            self.others_seen = False
+            return
+        if self._others_since is None:
+            self._others_since = w.now
+            acts.append(Action("log", f"同層附近出現 {w.others_near} 位玩家"))
+        elif (not self.others_seen
+              and w.now - self._others_since >= self.OTHERS_HOLD):
+            self.others_seen = True
+            if self.on_others == "idle" and self.state in ("FARM", "DESCEND"):
+                self._release_attack(acts)
+                self._to("IDLE_SAFE", acts, "同層有其他玩家 → 讓出位置", w)
 
     def _pickup_logic(self, w, acts):
         """定時撿物（掉落的楓幣/道具）。沒設定撿物鍵就完全不動作。"""
@@ -767,6 +801,10 @@ class Perception:
         from src.vision import ModalWatcher
         md = v.get("modal") or {}
         self.modal_enabled = bool(md.get("enabled", True))
+        oth = v.get("others") or {}
+        self.others_enabled = bool(oth.get("enabled", True))
+        self.others_dy = int(oth.get("dy_tol", 3))
+        self.others_dx = int(oth.get("dx_range", 40))
         self.modal = ModalWatcher(
             persist=md.get("persist", 3),
             min_area_frac=md.get("min_area_frac", 0.045),
@@ -837,7 +875,9 @@ class Perception:
             # 小地圖改用實測到的面板範圍（不再用固定 ROI + reference_size 換算）
             self.mm.roi = list(self.mm_rect)
             self.mm.reference_size = None
-        ok = bool(hp and mp and self.mm_rect and self.exp_roi_auto)
+        # MP 是選配（近戰職業可能不在意、或當下藍條空到看不見）——不可因為
+        # 少了 MP 就把整個校準判定為失敗，那會連 EXP 偵測一起關掉。
+        ok = bool(hp and self.mm_rect and self.exp_roi_auto)
         self.calib_note = (f"HP{'' if hp else '✗'} MP{'' if mp else '✗'} "
                            f"小地圖{self.mm_rect or '✗'} EXP{self.exp_roi_auto or '✗'}")
         self.calibrated = ok
@@ -867,7 +907,7 @@ class Perception:
         w = WorldState(now=now, cmd=cmd)
         info = {"anchor": None, "monsters": [], "anchor_score": 0.0,
                 "same_layer": 0, "exp_per_hour": 0.0, "mp": None,
-                "motion": None, "mon_hint": None, "modal": None,
+                "motion": None, "mon_hint": None, "modal": None, "others_near": 0,
                 "raw_size": None, "calibrated": self.calibrated}
         info["raw_size"] = self.raw_size
         info["calibrated"] = self.calibrated
@@ -887,6 +927,10 @@ class Perception:
         if self.modal_enabled:
             w.modal = self.modal.update(frame)
             info["modal"] = w.modal
+        if self.others_enabled and pos is not None:
+            w.others_near = self.mm.others_near(raw, pos, self.others_dy,
+                                                self.others_dx)
+            info["others_near"] = w.others_near
         er = self.exp_roi_auto or (0, 0, 1, 1)
         el, et, ew, eh = (int(x) for x in er)
         crop = raw[et:et + eh, el:el + ew].astype(np.int16)
@@ -1179,6 +1223,7 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
 
     heal_mode = cfg.get("survival", {}).get("heal_mode", "self")
     profile = ClassProfile.from_config(cfg.get("class_profile"))
+    core_on_others = (cfg.get("vision", {}).get("others") or {}).get("on_others", "log")
     log(f"職業設定：{profile.name}｜攻擊 {profile.attack_mode}"
         f"｜buff {len(profile.buffs)} 顆｜MP {'有' if profile.mp_key else '無'}")
     core = NightWatchCore(max_seconds=max_seconds, profile=profile,
@@ -1186,6 +1231,7 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
                           heal_mode=heal_mode,
                           last_resort_hp=float(cfg.get("survival", {})
                                                .get("last_resort_hp", 0.20)))
+    core.on_others = core_on_others
     log(f"補血模式：{heal_mode}"
         + ("（寵物/使用者負責，核心不碰藥水鍵）" if heal_mode == "external" else ""))
     f0 = cap.grab()
