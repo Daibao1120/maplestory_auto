@@ -10,6 +10,7 @@ from src.vision.ui_calibrate import (find_bar, find_minimap_rect, longest_run,
                                      BarReader, find_exp_bar, exp_text_roi,
                                      exp_text_roi_from_bars,
                                      find_bars_pair)
+from src.vision.motion import MotionDetector, split_activity
 from src.vision.synthetic import build_demo, DemoScene
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "PlayerAnchor", "search_window",
     "find_bar", "find_minimap_rect", "longest_run", "BarReader",
     "find_exp_bar", "exp_text_roi", "exp_text_roi_from_bars", "find_bars_pair",
+    "MotionDetector", "split_activity",
     "build_demo", "DemoScene",
 ]

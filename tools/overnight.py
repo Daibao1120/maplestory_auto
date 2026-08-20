@@ -58,6 +58,8 @@ class WorldState:
     # 怪物偵測（模板匹配、已用同高度帶過濾）：角色左右兩側各幾隻
     mon_left: int = 0
     mon_right: int = 0
+    # 免模板的活動偵測給的面向提示（"left"/"right"/None）——模板沒抓到怪時的後備
+    mon_hint: Optional[str] = None
 
 
 @dataclass
@@ -99,6 +101,8 @@ class ClassProfile:
     mp_key: Optional[str] = None
     mp_threshold: float = 0.30
     mp_cooldown: float = 2.5
+    pickup_key: Optional[str] = None      # 撿物鍵（通常是 z 或 space）
+    pickup_every: float = 4.0             # 幾秒撿一次
 
     @classmethod
     def from_config(cls, cfg):
@@ -117,7 +121,9 @@ class ClassProfile:
             rotation=rot, buffs=buffs,
             mp_key=mp.get("potion_key"),
             mp_threshold=float(mp.get("threshold", 0.30)),
-            mp_cooldown=float(mp.get("cooldown", 2.5)))
+            mp_cooldown=float(mp.get("cooldown", 2.5)),
+            pickup_key=(c.get("pickup") or {}).get("key"),
+            pickup_every=float((c.get("pickup") or {}).get("every", 4.0)))
 
 
 class NightWatchCore:
@@ -208,6 +214,7 @@ class NightWatchCore:
         self._skill_ready = {}       # 技能鍵 → 下次可用時間
         self._next_tap = 0.0         # tap 模式的下一次攻擊時間
         self._last_mp_potion = 0.0
+        self._next_pickup = 0.0
 
     # ---- 主入口 ----
     def tick(self, w: WorldState) -> List[Action]:
@@ -493,7 +500,14 @@ class NightWatchCore:
             self.facing = side
             self._last_turn = w.now
             acts.append(Action("turn", side))
-        elif (side is None
+        elif (side is None and w.mon_hint
+              and w.mon_hint != self.facing
+              and w.now - self._last_turn > 3.0):
+            # 模板沒抓到怪 → 用「哪邊在動」當後備提示（換地圖也能用）
+            self.facing = w.mon_hint
+            self._last_turn = w.now
+            acts.append(Action("turn", self.facing))
+        elif (side is None and not w.mon_hint
               and w.now - self._last_exp_ts > self.EXP_FLIP_AFTER
               and w.now - self._last_turn > self.EXP_FLIP_AFTER):
             self.facing = "left" if self.facing == "right" else "right"
@@ -502,9 +516,10 @@ class NightWatchCore:
             acts.append(Action("turn", self.facing))
             acts.append(Action("log", f"沒有經驗值進帳 → 轉向{self.facing}試"))
 
-        # buff 與 MP（職業設定驅動）
+        # buff / MP / 撿物（職業設定驅動）
         self._buff_logic(w, acts)
         self._mp_logic(w, acts)
+        self._pickup_logic(w, acts)
 
         # 攻擊：依職業設定分派（按住／連點／技能輪替）
         self._attack_logic(w, acts)
@@ -572,6 +587,15 @@ class NightWatchCore:
                 self._buff_due[key] = w.now + every
                 self.stats.buffs_cast += 1
                 return                           # 一圈只補一顆，避免連打一串
+
+    def _pickup_logic(self, w, acts):
+        """定時撿物（掉落的楓幣/道具）。沒設定撿物鍵就完全不動作。"""
+        p = self.profile
+        if not p.pickup_key:
+            return
+        if w.now >= self._next_pickup:
+            acts.append(Action("tap", p.pickup_key))
+            self._next_pickup = w.now + p.pickup_every * self.rng.uniform(0.9, 1.2)
 
     def _mp_logic(self, w, acts):
         """MP 不足就補（法師等吃 MP 的職業必要）。"""
@@ -681,6 +705,14 @@ class Perception:
         self._pos_miss = 0          # 連續讀不到玩家點的次數 → 觸發重新校準
         self._recalib_at = 0.0
         self.buffdet = None
+        from src.vision import MotionDetector
+        # 免模板後備：怪會動、背景不會（換地圖/換怪都能用）
+        mo = v.get("motion") or {}
+        self.motion = MotionDetector(
+            diff_thresh=mo.get("diff_thresh", 25),
+            dead_zone_frac=mo.get("dead_zone_frac", 0.07),
+            min_blob=mo.get("min_blob", 40))
+        self.motion_enabled = bool(mo.get("enabled", True))
         self._mon_t = 0.0
         self._mon = []
         self._prev_exp = None
@@ -771,6 +803,7 @@ class Perception:
         w = WorldState(now=now, cmd=cmd)
         info = {"anchor": None, "monsters": [], "anchor_score": 0.0,
                 "same_layer": 0, "exp_per_hour": 0.0, "mp": None,
+                "motion": None, "mon_hint": None,
                 "raw_size": None, "calibrated": self.calibrated}
         info["raw_size"] = self.raw_size
         info["calibrated"] = self.calibrated
@@ -834,6 +867,12 @@ class Perception:
                     right += 1
         w.mon_left, w.mon_right = left, right
         info["same_layer"] = left + right
+        if self.motion_enabled:
+            md = self.motion.update(frame)
+            info["motion"] = md
+            if left + right == 0:          # 模板沒抓到 → 用活動偵測當後備
+                w.mon_hint = self.motion.hint_side()
+            info["mon_hint"] = w.mon_hint
         return w, frame, info
 
     def find_buff(self, frame):
