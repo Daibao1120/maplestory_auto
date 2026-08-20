@@ -194,6 +194,7 @@ class Worker:
                         "y_band": tuple(self._per.y_band), "acting": self.acting,
                         "anchor_score": info["anchor_score"],
                         "mp": info.get("mp"), "calibrated": info.get("calibrated"),
+                        "modal": info.get("modal"), "motion": info.get("motion"),
                         "stats": dict(vars(self._core.stats)),
                     })
                 time.sleep(max(0.05, float(self.params.get("tick", 0.35))))
@@ -290,7 +291,7 @@ def main():
     ttk.Label(right, text="狀態", font=("", 11, "bold")).grid(
         column=0, row=0, columnspan=2, sticky="w")
     rows = [("state", "狀態機"), ("acting", "送鍵"), ("profile", "職業"),
-            ("calib", "UI 校準"), ("hp", "HP"), ("mp", "MP"),
+            ("calib", "UI 校準"), ("alert", "彈窗警示"), ("hp", "HP"), ("mp", "MP"),
             ("pos", "小地圖位置"), ("plat", "腳下平台"), ("same", "同層怪數"),
             ("facing", "面向"), ("exp", "EXP 進帳"), ("eph", "EXP/小時"),
             ("anchor", "角色定位")]
@@ -381,6 +382,9 @@ def main():
         stat["acting"].set("是（會操控角色）" if s.get("acting") else "否（只看）")
         stat["profile"].set(str(s.get("profile", "—")))
         stat["calib"].set("完成" if s.get("calibrated") else "校準中…")
+        modal = s.get("modal")
+        stat["alert"].set("⚠ 偵測到彈窗！已停止所有動作，請自行處理"
+                          if modal else "無")
         hp = s.get("hp")
         stat["hp"].set("讀不到" if hp is None else f"{hp:.0%}")
         mp = s.get("mp")

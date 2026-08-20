@@ -11,6 +11,8 @@ from src.vision.ui_calibrate import (find_bar, find_minimap_rect, longest_run,
                                      exp_text_roi_from_bars,
                                      find_bars_pair)
 from src.vision.motion import MotionDetector, split_activity
+from src.vision.modal import (ModalWatcher, find_modal, centrality,
+                              rects_overlap)
 from src.vision.synthetic import build_demo, DemoScene
 
 __all__ = [
@@ -23,5 +25,6 @@ __all__ = [
     "find_bar", "find_minimap_rect", "longest_run", "BarReader",
     "find_exp_bar", "exp_text_roi", "exp_text_roi_from_bars", "find_bars_pair",
     "MotionDetector", "split_activity",
+    "ModalWatcher", "find_modal", "centrality", "rects_overlap",
     "build_demo", "DemoScene",
 ]

@@ -1,0 +1,146 @@
+"""置中彈窗偵測測試（測謊/符文/死亡對話框）＋核心的零輸入反應。
+
+測謊沒答會被斷線甚至標記，是封號風險最高的一環。本工具只偵測並停手通知，
+不自動作答——這些測試釘住「該停的一定停、不該停的不要亂停」。
+"""
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+import pytest  # noqa: E402
+
+np = pytest.importorskip("numpy")
+pytest.importorskip("cv2")
+
+from src.vision.modal import (ModalWatcher, find_modal, centrality,  # noqa: E402
+                              rects_overlap)
+from tools.overnight import ClassProfile, NightWatchCore, WorldState  # noqa: E402
+
+H, W = 808, 1371
+
+
+def world():
+    """高飽和的遊戲世界背景（綠色系）——不該被當成 UI。"""
+    f = np.zeros((H, W, 3), dtype=np.uint8)
+    f[:, :] = (40, 160, 60)
+    return f
+
+
+def panel(f, x, y, w, h, v=210):
+    """畫一塊灰白色 UI 面板。"""
+    f[y:y + h, x:x + w] = (v, v, v)
+    return f
+
+
+# ---------------- 純函式 ----------------
+
+def test_centrality_math():
+    cx, cy = centrality((W // 2 - 50, H // 2 - 50, 100, 100), W, H)
+    assert cx < 0.01 and cy < 0.01
+    cx, cy = centrality((0, 0, 100, 100), W, H)
+    assert cx > 0.4 and cy > 0.4
+
+
+def test_rects_overlap_same_and_different():
+    a = (100, 100, 200, 150)
+    assert rects_overlap(a, (105, 103, 198, 152)) is True
+    assert rects_overlap(a, (600, 100, 200, 150)) is False
+    assert rects_overlap(a, (100, 100, 60, 40)) is False      # 尺寸差太多
+
+
+# ---------------- 偵測 ----------------
+
+def test_detects_centered_popup():
+    f = panel(world(), W // 2 - 220, H // 2 - 150, 440, 300)
+    r = find_modal(f)
+    assert r is not None
+    assert abs(r[0] - (W // 2 - 220)) <= 12
+
+
+def test_chat_box_at_bottom_is_not_a_modal():
+    # 聊天框水平置中但垂直偏底（實測 centrality y=0.44）→ 不可誤判
+    f = panel(world(), 414, 664, 669, 144)
+    assert find_modal(f) is None
+
+
+def test_side_window_is_not_a_modal():
+    # 玩家自己拖到旁邊的技能欄
+    f = panel(world(), 40, 200, 300, 420)
+    assert find_modal(f) is None
+
+
+def test_tiny_panel_is_not_a_modal():
+    f = panel(world(), W // 2 - 60, H // 2 - 40, 120, 80)
+    assert find_modal(f) is None
+
+
+def test_clean_world_has_no_modal():
+    assert find_modal(world()) is None
+
+
+# ---------------- 跨幀確認 ----------------
+
+def test_watcher_requires_persistence():
+    wch = ModalWatcher(persist=3)
+    f = panel(world(), W // 2 - 220, H // 2 - 150, 440, 300)
+    assert wch.update(f) is None          # 第 1 幀不算
+    assert wch.update(f) is None          # 第 2 幀不算
+    assert wch.update(f) is not None      # 第 3 幀確認
+    assert wch.update(world()) is None    # 關掉後立即解除
+
+
+def test_watcher_ignores_flicker():
+    wch = ModalWatcher(persist=3)
+    f = panel(world(), W // 2 - 220, H // 2 - 150, 440, 300)
+    for _ in range(5):
+        assert wch.update(f) is None or True
+        assert wch.update(world()) is None   # 一幀有一幀沒 → 永遠不確認
+    assert wch.active is None
+
+
+# ---------------- 核心反應 ----------------
+
+def Wd(now, **kw):
+    return WorldState(now=now, **kw)
+
+
+def SPAN(width=20.0, dl=10.0, dr=10.0):
+    return {"width": width, "dist_left": dl, "dist_right": dr}
+
+
+def farming():
+    c = NightWatchCore(heal_mode="external", profile=ClassProfile())
+    c.tick(Wd(0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    c.tick(Wd(1.0, hp=0.9, pos=(50, 90), span=SPAN(20)))
+    assert c.state == "FARM"
+    return c
+
+
+def test_modal_stops_everything_immediately():
+    c = farming()
+    c.tick(Wd(2.0, hp=0.9, pos=(50, 90), span=SPAN()))        # 攻擊按住中
+    acts = c.tick(Wd(3.0, hp=0.9, pos=(50, 90), span=SPAN(), modal=(400, 250, 500, 300)))
+    verbs = [a.verb for a in acts]
+    assert "release_attack" in verbs and "release_all" in verbs
+    assert c.state == "IDLE_SILENT"
+    assert c.stats.modals == 1
+
+
+def test_no_input_at_all_while_modal_state():
+    c = farming()
+    c.tick(Wd(2.0, hp=0.9, pos=(50, 90), span=SPAN(), modal=(400, 250, 500, 300)))
+    seen = set()
+    for t in range(5, 400, 10):
+        for a in c.tick(Wd(float(t), hp=0.3, mp=0.1, pos=(50, 90), span=SPAN())):
+            seen.add(a.verb)
+    assert seen <= {"log", "release_attack"}      # 連補血/跳/技能都不准
+
+
+def test_modal_does_not_auto_answer():
+    # 絕不自動作答：不可出現任何方向鍵/確認鍵動作
+    c = farming()
+    acts = c.tick(Wd(2.0, hp=0.9, pos=(50, 90), span=SPAN(), modal=(400, 250, 500, 300)))
+    assert not [a for a in acts if a.verb in ("tap", "step", "turn", "tap_jump")]

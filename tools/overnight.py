@@ -60,6 +60,8 @@ class WorldState:
     mon_right: int = 0
     # 免模板的活動偵測給的面向提示（"left"/"right"/None）——模板沒抓到怪時的後備
     mon_hint: Optional[str] = None
+    # 置中彈窗（測謊/符文/死亡對話框）；偵測到就立刻零輸入等使用者處理
+    modal: Optional[tuple] = None
 
 
 @dataclass
@@ -76,6 +78,7 @@ class Stats:
     descents: int = 0
     yields: int = 0
     recoveries: int = 0
+    modals: int = 0
     buffs_cast: int = 0
     mp_potions: int = 0
     skills_cast: int = 0
@@ -246,6 +249,15 @@ class NightWatchCore:
         # 環境安全：任一異常 → 放開攻擊鍵、不送任何鍵
         if not w.window or not w.frame_ok or not w.fg:
             self._release_attack(acts)
+            return acts
+
+        # 彈窗（測謊/符文/死亡…）→ 立刻停止所有輸入。沒答測謊會被斷線甚至
+        # 標記，是風險最高的一環；本工具只停手並通知，絕不自動作答。
+        if w.modal and self.state in ("FARM", "DESCEND", "VERIFY", "IDLE_SAFE"):
+            self._release_attack(acts)
+            acts.append(Action("release_all"))
+            self._to("IDLE_SILENT", acts, "偵測到彈窗（測謊/符文/死亡？）→ 零輸入", w)
+            self.stats.modals += 1
             return acts
 
         # 外部指令
@@ -713,6 +725,14 @@ class Perception:
             dead_zone_frac=mo.get("dead_zone_frac", 0.07),
             min_blob=mo.get("min_blob", 40))
         self.motion_enabled = bool(mo.get("enabled", True))
+        from src.vision import ModalWatcher
+        md = v.get("modal") or {}
+        self.modal_enabled = bool(md.get("enabled", True))
+        self.modal = ModalWatcher(
+            persist=md.get("persist", 3),
+            min_area_frac=md.get("min_area_frac", 0.045),
+            max_cx=md.get("max_center_x", 0.16),
+            max_cy=md.get("max_center_y", 0.20))
         self._mon_t = 0.0
         self._mon = []
         self._prev_exp = None
@@ -803,7 +823,7 @@ class Perception:
         w = WorldState(now=now, cmd=cmd)
         info = {"anchor": None, "monsters": [], "anchor_score": 0.0,
                 "same_layer": 0, "exp_per_hour": 0.0, "mp": None,
-                "motion": None, "mon_hint": None,
+                "motion": None, "mon_hint": None, "modal": None,
                 "raw_size": None, "calibrated": self.calibrated}
         info["raw_size"] = self.raw_size
         info["calibrated"] = self.calibrated
@@ -820,6 +840,9 @@ class Perception:
         info["mp"] = w.mp
 
         # EXP 變化（同時記錄時間戳供估算每小時進帳）
+        if self.modal_enabled:
+            w.modal = self.modal.update(frame)
+            info["modal"] = w.modal
         er = self.exp_roi_auto or (0, 0, 1, 1)
         el, et, ew, eh = (int(x) for x in er)
         crop = raw[et:et + eh, el:el + ew].astype(np.int16)
