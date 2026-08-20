@@ -56,6 +56,9 @@ class MonsterDetector:
         # 降取樣加速：畫面與模板同時縮小再匹配，座標回放大。實測 2736 寬畫面
         # scale=0.6 速度快 3 倍而最佳分數幾乎不變（0.65 vs 0.66）；0.5 會掉到 0.57。
         self.scale = float(config.get("scale", 1.0))
+        # 模板是在別的解析度截的 → 載入時先換算到目前畫面尺度。
+        # （例：模板截於 2736 寬、辨識在 1371 基準畫面上 → 0.5）
+        self.template_scale = float(config.get("template_scale", 1.0))
         self.skip = set(config.get("skip_templates") or ())
         self._templates: Dict[str, "np.ndarray"] = {}
         self._scaled: Dict[str, "np.ndarray"] = {}
@@ -122,7 +125,8 @@ class MonsterDetector:
         return self._nms(dets, self.iou_thresh)
 
     def _scaled_template(self, name, tmpl, s):
-        if s == 1.0:
+        s = s * self.template_scale
+        if abs(s - 1.0) < 1e-6:
             return tmpl
         key = f"{name}@{s}"
         cached = self._scaled.get(key)

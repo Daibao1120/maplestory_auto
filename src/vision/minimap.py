@@ -156,6 +156,9 @@ class MinimapLocator:
         # 面積上限：玩家點只有十幾 px；ROI 放寬後可能掃到場景裡的大片亮黃
         # （花叢/告示牌），超過上限的色塊一律不是玩家點。None = 不設限。
         self.max_blob_area = config.get("max_blob_area")
+        # 玩家點含有「純亮」像素（實測 V=255），地圖上的黃色裝飾物最高只到
+        # 238——用這個尖峰亮度就能把裝飾物乾淨濾掉（面積相同時無法區分）。
+        self.peak_v_min = config.get("peak_v_min")
 
     # ---- 對外 ----
     def locate_minimap(self, frame):
@@ -188,13 +191,23 @@ class MinimapLocator:
         if region.size == 0:
             return []
         mask = self._mask(region, self.player_lower, self.player_upper)
-        num, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        num, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        vch = None
+        if self.peak_v_min is not None:
+            vch = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)[:, :, 2]
         out = []
         for lbl in range(1, num):  # 跳過背景
             area = int(stats[lbl, cv2.CC_STAT_AREA])
-            if area >= self.min_blob_area and not self._too_big(area):
-                cx, cy = centroids[lbl]
-                out.append((int(round(cx / sx)), int(round(cy / sy)), area))
+            if area < self.min_blob_area or self._too_big(area):
+                continue
+            if vch is not None:
+                x, y = int(stats[lbl, cv2.CC_STAT_LEFT]), int(stats[lbl, cv2.CC_STAT_TOP])
+                bw, bh = int(stats[lbl, cv2.CC_STAT_WIDTH]), int(stats[lbl, cv2.CC_STAT_HEIGHT])
+                sub = vch[y:y + bh, x:x + bw]
+                if sub.size == 0 or int(sub.max()) < int(self.peak_v_min):
+                    continue          # 沒有純亮尖峰 → 是裝飾物不是玩家
+            cx, cy = centroids[lbl]
+            out.append((int(round(cx / sx)), int(round(cy / sy)), area))
         return sorted(out, key=lambda b: -b[2])
 
     def _too_big(self, area):

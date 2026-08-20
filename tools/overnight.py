@@ -547,6 +547,11 @@ class Perception:
         self._np = np
         self.cfg = cfg
         v = cfg["vision"]
+        # 畫面正規化：不論遊戲視窗多大，一律先縮到基準尺寸再做辨識。
+        # 使用者改視窗/解析度（實測 2736→3840）時，硬寫的 ROI 與模板會全部
+        # 錯位；正規化後所有座標只需校準一次，且小圖處理也快得多。
+        self.canon = tuple(v.get("canonical_size") or [1371, 808])
+        self.raw_size = None      # 最近一次原始畫面尺寸（換算螢幕座標用）
         self.cap = ScreenCapture(backend="mss", window_title=cfg["window"]["title"])
         self.mm = MinimapLocator(v["minimap"])
         self.tracker = PlayerTracker()
@@ -558,8 +563,25 @@ class Perception:
             threshold=pa.get("match_threshold", 0.75))
         self.mondet = MonsterDetector(v["monster"])
         self.mondet.load_templates()
-        self.y_band = cfg.get("combat", {}).get("attack_y_band") or [-60, 60]
+        self.y_band = cfg.get("combat", {}).get("attack_y_band") or [-30, 30]
         self.mon_every = float(v["monster"].get("detect_interval", 0.7))
+        # UI 條的位置（基準尺度 px；正規化後不隨遊戲解析度改變）
+        self.hp_scan = v.get("hp_scan") or [280, 770, 371, 30]
+        self.exp_roi = v.get("exp_roi") or [511, 760, 130, 20]
+        self.anchor_enabled = bool((v.get("player_anchor") or {}).get("enabled", False))
+        self._anchor_fails = 0
+        self._anchor_off_until = 0.0
+        # UI 自動校準：遊戲 UI 不隨解析度等比縮放，硬寫座標必失效（實測
+        # 2736→3840 全錯位）。每次啟動自動找 HP/MP 條、EXP 文字區、小地圖面板。
+        from src.vision import BarReader
+        self.hp_reader = BarReader("red")
+        self.mp_reader = BarReader("blue")
+        self.mm_rect = None
+        self.exp_roi_auto = None
+        self.calibrated = False
+        self.calib_note = ""
+        self._pos_miss = 0          # 連續讀不到玩家點的次數 → 觸發重新校準
+        self._recalib_at = 0.0
         self.buffdet = None
         self._mon_t = 0.0
         self._mon = []
@@ -576,7 +598,8 @@ class Perception:
         return (r > 150) & (r - g > 60) & (r - b > 60)
 
     def locate_hp(self, frame):
-        m = self._red(frame[1540:1596, 560:1300])
+        sl, st, sw, sh = (int(x) for x in self.hp_scan)
+        m = self._red(frame[st:st + sh, sl:sl + sw])
         best = (0, 0, 0)
         for y in range(m.shape[0]):
             n = st = 0
@@ -590,39 +613,84 @@ class Perception:
                 else:
                     n = 0
         L, s, y = best
-        if L < 40:
+        if L < 20:
             return False
-        self._hp = {"roi": (1540 + y - 4, 1540 + y + 5, 560 + s - 2,
-                            min(1300, 560 + s + int(L / 0.89) + 10)),
+        self._hp = {"roi": (st + y - 3, st + y + 4, sl + s - 2,
+                            min(sl + sw, sl + s + int(L / 0.89) + 6)),
                     "full": int(L / 0.89)}
         return True
+
+    def calibrate(self, raw):
+        """在原始解析度畫面上自動定位 UI 元件。回傳是否全部找到。"""
+        from src.vision import find_bars_pair, find_minimap_rect, exp_text_roi_from_bars
+        hp, mp = find_bars_pair(raw)
+        if hp:
+            self.hp_reader.rect = hp
+            self.hp_reader.full = max(self.hp_reader.full, hp["len"])
+        if mp:
+            self.mp_reader.rect = mp
+            self.mp_reader.full = max(self.mp_reader.full, mp["len"])
+        new_rect = find_minimap_rect(raw)
+        if new_rect and self.mm_rect:
+            # 面板尺寸應該穩定；差太多代表這次抓到的是別的深色視窗 → 保留舊的
+            ow, oh = self.mm_rect[2], self.mm_rect[3]
+            nw, nh = new_rect[2], new_rect[3]
+            if abs(nw - ow) > ow * 0.4 or abs(nh - oh) > oh * 0.4:
+                new_rect = self.mm_rect
+        self.mm_rect = new_rect or self.mm_rect
+        self.exp_roi_auto = exp_text_roi_from_bars(raw, hp, mp)
+        if self.mm_rect:
+            # 小地圖改用實測到的面板範圍（不再用固定 ROI + reference_size 換算）
+            self.mm.roi = list(self.mm_rect)
+            self.mm.reference_size = None
+        ok = bool(hp and mp and self.mm_rect and self.exp_roi_auto)
+        self.calib_note = (f"HP{'' if hp else '✗'} MP{'' if mp else '✗'} "
+                           f"小地圖{self.mm_rect or '✗'} EXP{self.exp_roi_auto or '✗'}")
+        self.calibrated = ok
+        return ok
 
     def snapshot(self, now, cmd=""):
         """回傳 (WorldState, frame, info)。frame 可能為 None（抓不到畫面）。"""
         np = self._np
+        import cv2
         try:
-            frame = self.cap.grab()
+            raw = self.cap.grab()
         except Exception:
-            frame = None
+            raw = None
+        frame = raw
+        if raw is not None:
+            self.raw_size = (raw.shape[1], raw.shape[0])
+            # 世界（怪物模板）用正規化畫面；UI（血條/小地圖）用原始畫面——
+            # UI 不隨解析度等比縮放，縮圖只會讓它更難認。
+            if (raw.shape[1], raw.shape[0]) != self.canon:
+                frame = cv2.resize(raw, self.canon, interpolation=cv2.INTER_AREA)
+            # 首次校準；之後若連續讀不到玩家點（面板範圍可能抓歪或視窗移動）
+            # 就重新校準——UI 位置會因開關視窗/移動視窗而改變。
+            if not self.calibrated or (self._pos_miss >= 8 and now >= self._recalib_at):
+                if self.calibrate(raw):
+                    self._pos_miss = 0
+                self._recalib_at = now + 15.0
         w = WorldState(now=now, cmd=cmd)
         info = {"anchor": None, "monsters": [], "anchor_score": 0.0,
-                "same_layer": 0, "exp_per_hour": 0.0}
+                "same_layer": 0, "exp_per_hour": 0.0, "mp": None,
+                "raw_size": None, "calibrated": self.calibrated}
+        info["raw_size"] = self.raw_size
+        info["calibrated"] = self.calibrated
         if frame is None or float(frame.mean()) < 3:
             w.frame_ok = False
             return w, frame, info
 
-        pos = self.tracker.update(self.mm.locate_player_candidates(frame))
+        pos = self.tracker.update(self.mm.locate_player_candidates(raw))
+        self._pos_miss = 0 if pos else self._pos_miss + 1
         w.pos = pos
-        w.span = self.mm.platform_span(frame, pos) if pos else None
-        if not self._hp:
-            self.locate_hp(frame)
-        if self._hp:
-            y1, y2, x1, x2 = self._hp["roi"]
-            wred = self._red(frame[y1:y2, x1:x2]).any(axis=0).sum()
-            w.hp = float(wred) / max(1, self._hp["full"])
+        w.span = self.mm.platform_span(raw, pos) if pos else None
+        w.hp = self.hp_reader.read(raw)
+        info["mp"] = self.mp_reader.read(raw)
 
         # EXP 變化（同時記錄時間戳供估算每小時進帳）
-        crop = frame[1520:1556, 1020:1280].astype(np.int16)
+        er = self.exp_roi_auto or (0, 0, 1, 1)
+        el, et, ew, eh = (int(x) for x in er)
+        crop = raw[et:et + eh, el:el + ew].astype(np.int16)
         if self._prev_exp is not None:
             if float(np.abs(crop - self._prev_exp).mean()) > 1.5:
                 w.exp_changed = True
@@ -639,7 +707,19 @@ class Perception:
                 self._mon = self.mondet.detect(frame)
             except Exception:
                 self._mon = []
-        ap = self.anchor.find(frame) if self.anchor.available else None
+        ap = None
+        if (self.anchor_enabled and self.anchor.available
+                and now >= self._anchor_off_until):
+            ap = self.anchor.find(frame)
+            if ap is None:
+                self._anchor_fails += 1
+                if self._anchor_fails >= 3:
+                    # 名牌比對失敗時會全幀重掃，實測吃掉 2.3 秒/圈——連續失敗
+                    # 就先休息，避免拖垮整個迴圈（面向本來就以 EXP 回饋為主）
+                    self._anchor_off_until = now + 60.0
+                    self._anchor_fails = 0
+            else:
+                self._anchor_fails = 0
         info["anchor"], info["anchor_score"] = ap, self.anchor.last_score
         h, wpx = frame.shape[:2]
         axm, aym = ap if ap else (wpx // 2, h // 2)
