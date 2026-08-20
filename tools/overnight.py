@@ -81,6 +81,7 @@ class Stats:
     yields: int = 0
     recoveries: int = 0
     modals: int = 0
+    patrols: int = 0
     buffs_cast: int = 0
     mp_potions: int = 0
     skills_cast: int = 0
@@ -156,6 +157,11 @@ class NightWatchCore:
     # 下降步驟之間要等角色真的走出去並落地；不等的話每圈都送一步，
     # 實測 4.3 秒就把 8 步預算燒光並誤判成「下不去」而放棄。
     DESCEND_STEP_EVERY = 1.6
+    # 平台內巡邏：站著不動只能打「走過來的怪」，沿平台移動可明顯提高每小時
+    # 經驗。過去移動老是掉平台，是因為量不到平台邊界；現在 platform_span
+    # 實測 100% 可靠，且每一步都要先確認「往那邊還有足夠空間」才走。
+    PATROL_MIN_WIDTH = 12.0     # 平台至少這麼寬才巡邏（窄島一律不動）
+    PATROL_SAFE_MARGIN = 4.0    # 走完後距離邊緣至少要保留這麼多
     EXP_STALL_LIMIT = 480.0
     # 用「經驗值有沒有進帳」當回饋來決定面向：打得到怪就會有 EXP，久久沒進帳
     # 就轉向另一邊試。這比幾何判斷可靠——不需要知道角色在畫面哪個像素，
@@ -228,6 +234,11 @@ class NightWatchCore:
         self._silent_reason = ""      # 進入 IDLE_SILENT 的原因（決定能否自動恢復）
         self._modal_gone_since: Optional[float] = None
         self._others_since: Optional[float] = None
+        self.patrol_enabled = False
+        self.patrol_every = (25.0, 40.0)
+        self.patrol_step = 0.35
+        self._next_patrol: Optional[float] = None
+        self._patrol_dir = "right"
         self.on_others = "log"        # log | idle —— 遇人時的反應
         self.others_seen = False
         self._buff_due = {}          # 鍵 → 下次施放時間
@@ -589,6 +600,9 @@ class NightWatchCore:
                 acts.append(Action("release_moves"))
                 self.stats.guard_pushes += 1
 
+        # 平台內巡邏（可選）：往空間較大的一側走一段，提高遇怪率
+        self._patrol_logic(w, acts)
+
         # 防失效小碎步
         if self._next_repos is not None and w.now >= self._next_repos:
             self._next_repos = w.now + self.rng.uniform(*self.REPOS_EVERY)
@@ -641,6 +655,38 @@ class NightWatchCore:
                 self._buff_due[key] = w.now + every
                 self.stats.buffs_cast += 1
                 return                           # 一圈只補一顆，避免連打一串
+
+    def _patrol_logic(self, w, acts):
+        """平台內巡邏：只在「量得到平台、夠寬、且該方向有足夠餘裕」時才走。
+
+        安全前提（缺一不可）：
+          - 平台寬度 >= PATROL_MIN_WIDTH（窄島完全不巡邏）
+          - 走完之後距離該側邊緣仍有 PATROL_SAFE_MARGIN
+        走不了就換方向，換了還是走不了就這輪不動——寧可不走也不掉下去。
+        """
+        if not self.patrol_enabled or w.span is None:
+            return
+        if self._next_patrol is None:
+            self._next_patrol = w.now + self.rng.uniform(*self.patrol_every)
+            return
+        if w.now < self._next_patrol:
+            return
+        self._next_patrol = w.now + self.rng.uniform(*self.patrol_every)
+        if w.span["width"] < self.PATROL_MIN_WIDTH:
+            return                       # 平台太窄，不冒險
+        # 走一步大約會前進多少（小地圖 px）：實測一步 ~0.2s 約 1~2 px
+        expect = max(1.0, self.patrol_step * 6.0)
+        for d in (self._patrol_dir,
+                  "left" if self._patrol_dir == "right" else "right"):
+            room = w.span["dist_right"] if d == "right" else w.span["dist_left"]
+            if room >= expect + self.PATROL_SAFE_MARGIN:
+                self._release_attack(acts)
+                acts.append(Action("step", (d, self.patrol_step)))
+                acts.append(Action("release_moves"))
+                self._patrol_dir = d
+                self.stats.patrols += 1
+                return
+            self._patrol_dir = d         # 這側不夠 → 下次先試另一側
 
     def _others_logic(self, w, acts):
         """同層附近出現其他玩家時的反應（預設只記錄，可設定成停手）。"""
@@ -787,6 +833,8 @@ class Perception:
         self.exp_roi_auto = None
         self.calibrated = False
         self.calib_note = ""
+        self.in_game = True          # HP/MP 條同時存在＝真的在遊戲畫面內
+        self._not_in_game = 0
         self._pos_miss = 0          # 連續讀不到玩家點的次數 → 觸發重新校準
         self._recalib_at = 0.0
         self.buffdet = None
@@ -908,11 +956,23 @@ class Perception:
         info = {"anchor": None, "monsters": [], "anchor_score": 0.0,
                 "same_layer": 0, "exp_per_hour": 0.0, "mp": None,
                 "motion": None, "mon_hint": None, "modal": None, "others_near": 0,
+                "in_game": True,
                 "raw_size": None, "calibrated": self.calibrated}
         info["raw_size"] = self.raw_size
         info["calibrated"] = self.calibrated
         if frame is None or float(frame.mean()) < 3:
             w.frame_ok = False
+            return w, frame, info
+
+        # 是否在遊戲畫面內：登入/選頻/斷線畫面沒有並排的 HP+MP 條。
+        # 不在遊戲中時所有讀值都沒有意義，且核心不該送任何按鍵。
+        from src.vision import find_bars_pair
+        _hp_b, _mp_b = find_bars_pair(raw)
+        self._not_in_game = 0 if (_hp_b and _mp_b) else self._not_in_game + 1
+        self.in_game = self._not_in_game < 6
+        info["in_game"] = self.in_game
+        if not self.in_game:
+            w.frame_ok = False       # 等同「畫面不可用」→ 核心放開按鍵、不動作
             return w, frame, info
 
         pos = self.tracker.update(self.mm.locate_player_candidates(raw))
@@ -1232,6 +1292,15 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
                           last_resort_hp=float(cfg.get("survival", {})
                                                .get("last_resort_hp", 0.20)))
     core.on_others = core_on_others
+    pt = (cfg.get("combat", {}) or {}).get("patrol") or {}
+    core.patrol_enabled = bool(pt.get("enabled", False))
+    core.patrol_every = (float(pt.get("min_seconds", 25)),
+                         float(pt.get("max_seconds", 40)))
+    core.patrol_step = float(pt.get("step_seconds", 0.35))
+    if core.patrol_enabled:
+        log(f"平台內巡邏：開啟（每 {core.patrol_every[0]:.0f}~"
+            f"{core.patrol_every[1]:.0f} 秒一步，僅在寬度 >= "
+            f"{core.PATROL_MIN_WIDTH:.0f} 的平台）")
     log(f"補血模式：{heal_mode}"
         + ("（寵物/使用者負責，核心不碰藥水鍵）" if heal_mode == "external" else ""))
     f0 = cap.grab()

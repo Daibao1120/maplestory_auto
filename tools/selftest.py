@@ -63,6 +63,7 @@ def run(seconds=45.0, cfg_path=None):
         tick_ms.append((time.perf_counter() - s) * 1000)
         n += 1
         ok["畫面"] += bool(w.frame_ok)
+        ok["在遊戲中"] += bool(info.get("in_game", True))
         ok["UI 校準"] += bool(info.get("calibrated"))
         ok["HP"] += w.hp is not None
         ok["MP"] += w.mp is not None
@@ -82,6 +83,12 @@ def run(seconds=45.0, cfg_path=None):
     per.close()
 
     dur = time.time() - t0
+    if ok["在遊戲中"] / max(1, n) < 0.5:
+        print("\n=== 整備度報告 ===")
+        print("  [紅] 目前不在遊戲畫面內（登入畫面／選頻道／斷線？）")
+        print("       請先回到遊戲中再跑——其他讀值在此狀態下沒有意義。")
+        print(f"  （{n} 圈中只有 {ok['在遊戲中']} 圈偵測到遊戲內 UI）")
+        return 0
     print(f"\n=== 整備度報告（{n} 圈 / {dur:.0f} 秒，平均 "
           f"{sum(tick_ms)/max(1,len(tick_ms)):.0f} ms/圈）===")
     rows = [
@@ -106,6 +113,8 @@ def run(seconds=45.0, cfg_path=None):
     print(f"\n  EXP 進帳：{exp_events} 次"
           f"（{exp_events / max(dur, 1) * 3600:.0f} 次/小時）")
     print(f"  狀態分佈：{dict(states)}")
+    st = {k: v for k, v in vars(core.stats).items() if v}
+    print(f"  核心計數：{st or '無'}")
     print(f"  核心會送出的動作：{dict(acts) or '無'}")
     if logs:
         print("  核心事件（狀態轉換理由）：")

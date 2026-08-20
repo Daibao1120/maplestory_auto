@@ -44,9 +44,18 @@ def rects_overlap(a, b, tol=0.35):
     return union > 0 and inter / union >= 0.5
 
 
-def find_modal(frame, min_area_frac=0.045, max_area_frac=0.55,
-               max_cx=0.16, max_cy=0.20, sat_max=60, val_min=110):
-    """找畫面正中央的大型 UI 面板，回傳 (x, y, w, h) 或 None。"""
+def find_modal(frame, min_area_frac=0.045, max_area_frac=0.35,
+               max_cx=0.16, max_cy=0.20, sat_max=60, val_min=110,
+               max_span=0.75, min_fill=0.55):
+    """找畫面正中央的大型 UI 面板，回傳 (x, y, w, h) 或 None。
+
+    除了「夠大 + 夠置中」，還要求：
+      - 不可佔滿整個畫面（max_span）：彈窗是有邊界的面板。實測遊戲斷線後
+        停在登入畫面時整片偏亮，舊版把 (0,0,1371,754) 整張畫面當成彈窗，
+        誤報率 99%。
+      - 外接框要被填滿（min_fill）：真正的面板是實心矩形；散佈的亮背景
+        雖然外接框很大，填充率卻很低。
+    """
     if not _CV_AVAILABLE or frame is None:
         return None
     h, w = frame.shape[:2]
@@ -63,6 +72,10 @@ def find_modal(frame, min_area_frac=0.045, max_area_frac=0.55,
             continue
         if bw < w * 0.12 or bh < h * 0.10:
             continue
+        if bw > w * max_span or bh > h * max_span:
+            continue                     # 佔滿整個畫面 → 不是彈窗（登入/載入畫面）
+        if area < bw * bh * min_fill:
+            continue                     # 外接框沒被填滿 → 是散佈的亮背景不是面板
         cx, cy = centrality((x, y, bw, bh), w, h)
         if cx > max_cx or cy > max_cy:
             continue                     # 不夠置中（聊天框、側邊視窗等）

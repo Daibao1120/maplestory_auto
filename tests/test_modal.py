@@ -192,3 +192,31 @@ def test_exp_stall_silence_does_not_auto_recover():
     for t in range(600, 2000, 100):
         c.tick(Wd(float(t), hp=0.9, pos=(50, 90), span=SPAN()))
     assert c.state == "IDLE_SILENT"
+
+
+def test_full_screen_bright_is_not_a_modal():
+    """整片偏亮的畫面（登入/選頻/斷線）不可被當成彈窗。
+
+    實機案例：遊戲斷線後停在登入畫面，舊版把 (0,0,1371,754) 整張畫面判成
+    彈窗，誤報率 99%，核心 1.5 秒就停手不動。
+    """
+    f = np.full((H, W, 3), 200, dtype=np.uint8)      # 幾乎整片亮白
+    assert find_modal(f) is None
+
+
+def test_scattered_bright_background_is_not_a_modal():
+    """散佈的亮色背景外接框雖大，但填充率低 → 不是面板。"""
+    f = world()
+    rng = np.random.default_rng(3)
+    for _ in range(260):                             # 散落的亮點遍佈中央
+        x = int(rng.integers(W // 2 - 300, W // 2 + 300))
+        y = int(rng.integers(H // 2 - 200, H // 2 + 200))
+        f[y:y + 14, x:x + 14] = (205, 205, 205)
+    assert find_modal(f) is None
+
+
+def test_real_sized_dialog_still_detected():
+    """真正的對話框（實心、置中、佔畫面一小部分）仍要偵測得到。"""
+    f = panel(world(), W // 2 - 230, H // 2 - 140, 460, 280)
+    r = find_modal(f)
+    assert r is not None and r[2] < W * 0.75
