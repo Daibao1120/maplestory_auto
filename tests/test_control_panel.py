@@ -92,3 +92,31 @@ def test_worker_starts_stopped_and_stop_is_idempotent():
     w.stop()
     w.stop()
     assert w.running is False
+
+
+# ---------------- ROI 尺寸變動（實機崩潰過的路徑）----------------
+
+def test_region_changed_survives_roi_resize():
+    """自動重新校準後 ROI 尺寸會變（實測 EXP 區寬 220→224）。
+
+    舊版直接相減 → ValueError 讓整支工具當掉。這裡釘住：尺寸不同時不比較、
+    只重建基準，下一幀才恢復偵測。
+    """
+    from tools.overnight import region_changed
+    a = np.zeros((26, 220, 3), dtype=np.int16)
+    b = np.zeros((26, 224, 3), dtype=np.int16)      # 重新校準後變寬
+    changed, prev = region_changed(a, b)
+    assert changed is False and prev.shape == b.shape
+    # 下一幀同尺寸就恢復正常比較
+    c = b.copy()
+    c[:, :, :] = 40
+    changed, prev = region_changed(prev, c)
+    assert changed is True
+
+
+def test_region_changed_handles_none_and_no_change():
+    from tools.overnight import region_changed
+    changed, prev = region_changed(None, np.zeros((4, 4, 3), dtype=np.int16))
+    assert changed is False and prev is not None
+    same = np.zeros((4, 4, 3), dtype=np.int16)
+    assert region_changed(same, same.copy())[0] is False

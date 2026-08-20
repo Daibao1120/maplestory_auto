@@ -129,14 +129,17 @@ def test_modal_stops_everything_immediately():
     assert c.stats.modals == 1
 
 
-def test_no_input_at_all_while_modal_state():
+def test_no_input_at_all_while_modal_is_up():
+    """彈窗還在畫面上的期間，一個按鍵都不准送（含補血/跳/技能）。"""
     c = farming()
-    c.tick(Wd(2.0, hp=0.9, pos=(50, 90), span=SPAN(), modal=(400, 250, 500, 300)))
     seen = set()
-    for t in range(5, 400, 10):
-        for a in c.tick(Wd(float(t), hp=0.3, mp=0.1, pos=(50, 90), span=SPAN())):
+    for t in range(2, 400, 10):
+        acts = c.tick(Wd(float(t), hp=0.3, mp=0.1, pos=(50, 90), span=SPAN(),
+                         modal=(400, 250, 500, 300)))
+        for a in acts:
             seen.add(a.verb)
-    assert seen <= {"log", "release_attack"}      # 連補血/跳/技能都不准
+    assert c.state == "IDLE_SILENT"
+    assert seen <= {"log", "release_attack", "release_all"}
 
 
 def test_modal_does_not_auto_answer():
@@ -144,3 +147,48 @@ def test_modal_does_not_auto_answer():
     c = farming()
     acts = c.tick(Wd(2.0, hp=0.9, pos=(50, 90), span=SPAN(), modal=(400, 250, 500, 300)))
     assert not [a for a in acts if a.verb in ("tap", "step", "turn", "tap_jump")]
+
+
+# ---------------- 彈窗消失後的自動恢復（實跑 90 秒發現的缺陷）----------------
+
+def test_recovers_after_modal_disappears():
+    """彈窗關掉後要能自己回去打怪。
+
+    實跑 90 秒觀察到核心卡在 IDLE_SILENT 227/317 圈——彈窗早已消失卻永遠
+    不恢復，等於一次彈窗就讓整晚停擺。測謊被答掉之後本來就該繼續。
+    """
+    c = farming()
+    c.tick(Wd(2.0, hp=0.9, pos=(50, 90), span=SPAN(), modal=(400, 250, 500, 300)))
+    assert c.state == "IDLE_SILENT"
+    # 彈窗還在 → 不恢復
+    c.tick(Wd(60.0, hp=0.9, pos=(50, 90), span=SPAN(), modal=(400, 250, 500, 300)))
+    assert c.state == "IDLE_SILENT"
+    # 彈窗消失但還沒滿觀察期 → 仍不恢復
+    c.tick(Wd(70.0, hp=0.9, pos=(50, 90), span=SPAN()))
+    assert c.state == "IDLE_SILENT"
+    # 消失夠久 → 自動恢復
+    c.tick(Wd(70.0 + NightWatchCore.MODAL_CLEAR_SECONDS + 1,
+              hp=0.9, pos=(50, 90), span=SPAN()))
+    assert c.state == "VERIFY"
+    assert c.stats.recoveries == 1
+
+
+def test_reappearing_modal_resets_the_clear_timer():
+    c = farming()
+    c.tick(Wd(2.0, hp=0.9, pos=(50, 90), span=SPAN(), modal=(400, 250, 500, 300)))
+    c.tick(Wd(20.0, hp=0.9, pos=(50, 90), span=SPAN()))              # 消失
+    c.tick(Wd(50.0, hp=0.9, pos=(50, 90), span=SPAN(), modal=(400, 250, 500, 300)))
+    c.tick(Wd(80.0, hp=0.9, pos=(50, 90), span=SPAN()))              # 又消失，重新計時
+    assert c.state == "IDLE_SILENT"
+
+
+def test_exp_stall_silence_does_not_auto_recover():
+    """EXP 停滯造成的靜默需要人工處理，不可自己恢復。"""
+    c = farming()
+    c.tick(Wd(2.0, hp=0.9, pos=(50, 90), span=SPAN()))
+    c.tick(Wd(2.0 + NightWatchCore.EXP_STALL_LIMIT + 5, hp=0.9,
+              pos=(50, 90), span=SPAN()))
+    assert c.state == "IDLE_SILENT"
+    for t in range(600, 2000, 100):
+        c.tick(Wd(float(t), hp=0.9, pos=(50, 90), span=SPAN()))
+    assert c.state == "IDLE_SILENT"

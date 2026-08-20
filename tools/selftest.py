@@ -51,6 +51,7 @@ def run(seconds=45.0, cfg_path=None):
     acts = Counter()
     states = Counter()
     exp_events = 0
+    logs = []            # 核心的狀態轉換理由——診斷「為什麼停手」的關鍵
     tick_ms = []
     t0 = time.time()
     print(f"觀察 {seconds:.0f} 秒（只看不送鍵）…職業={profile.name}／"
@@ -74,6 +75,8 @@ def run(seconds=45.0, cfg_path=None):
         states[core.state] += 1
         for a in out:
             acts[a.verb] += 1
+            if a.verb == "log":
+                logs.append(f"{time.time() - t0:5.1f}s  {a.arg}")
         time.sleep(0.05)
     per.close()
 
@@ -103,6 +106,12 @@ def run(seconds=45.0, cfg_path=None):
           f"（{exp_events / max(dur, 1) * 3600:.0f} 次/小時）")
     print(f"  狀態分佈：{dict(states)}")
     print(f"  核心會送出的動作：{dict(acts) or '無'}")
+    if logs:
+        print("  核心事件（狀態轉換理由）：")
+        for line in logs[:12]:
+            print(f"    {line}")
+        if len(logs) > 12:
+            print(f"    …另有 {len(logs) - 12} 筆")
     slow = sum(1 for t in tick_ms if t > 800) / max(1, len(tick_ms))
     print(f"  迴圈速度：{'綠' if slow < 0.1 else '黃'}（超過 800ms 的圈佔 {slow:.0%}）")
     return 0

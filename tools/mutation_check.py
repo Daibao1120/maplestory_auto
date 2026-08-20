@@ -1,3 +1,9 @@
+import sys as _sys
+try:
+    _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # -*- coding: utf-8 -*-
 """Mutation 測試：故意破壞每條安全規則，測試套件必須抓到（否則測試是空的）。"""
 import os

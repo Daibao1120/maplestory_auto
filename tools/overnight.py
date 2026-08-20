@@ -160,6 +160,10 @@ class NightWatchCore:
     IDLE_CLEAN_NEED = 30.0        # 「乾淨」需持續的秒數
     IDLE_RECOVER_MAX = 4          # 一晚自動恢復次數上限
     IDLE_HP_DROP_SILENT = 0.12    # IDLE_SAFE 期間掉血超過此幅度 → 轉入靜默
+    # 彈窗消失後多久可自動恢復。測謊被答掉/誤判的 UI 視窗關掉之後就該繼續，
+    # 否則一次彈窗會讓整晚停擺（實測 90 秒觀察中出現 227 圈卡在靜默）。
+    # 其他原因（EXP 停滯、補血失效）進入的靜默仍需人工處理，不自動恢復。
+    MODAL_CLEAR_SECONDS = 45.0
 
     # 快捷欄全鍵位：不知道藥水放哪一格就自己一個一個試（看 HP 有沒有回升），
     # 不必問使用者。第一個是設定檔給的鍵，其餘依序輪替。
@@ -213,6 +217,8 @@ class NightWatchCore:
         self._clean_since: Optional[float] = None
         self.facing: Optional[str] = None      # 目前面向（依怪物分佈決定）
         self._last_turn = 0.0
+        self._silent_reason = ""      # 進入 IDLE_SILENT 的原因（決定能否自動恢復）
+        self._modal_gone_since: Optional[float] = None
         self._buff_due = {}          # 鍵 → 下次施放時間
         self._skill_ready = {}       # 技能鍵 → 下次可用時間
         self._next_tap = 0.0         # tap 模式的下一次攻擊時間
@@ -257,6 +263,8 @@ class NightWatchCore:
             self._release_attack(acts)
             acts.append(Action("release_all"))
             self._to("IDLE_SILENT", acts, "偵測到彈窗（測謊/符文/死亡？）→ 零輸入", w)
+            self._silent_reason = "modal"
+            self._modal_gone_since = None
             self.stats.modals += 1
             return acts
 
@@ -267,11 +275,26 @@ class NightWatchCore:
         elif w.cmd == "farm" and self.state in ("IDLE_SAFE", "IDLE_SILENT"):
             self._to("VERIFY", acts, "外部指令 farm", w)
 
-        # IDLE_SILENT：零輸入（環境檢查後直接返回；只有上面的 cmd 能離開）
+        # IDLE_SILENT：零輸入。彈窗造成的靜默，在彈窗消失夠久後可自動恢復
+        #（測謊被答掉、或誤判的 UI 視窗被關掉）；其他原因仍需人工處理。
         if self.state == "IDLE_SILENT":
             self._release_attack(acts)
             if w.exp_changed:
                 self.stats.exp_count += 1
+            if self._silent_reason == "modal":
+                if w.modal:
+                    self._modal_gone_since = None
+                else:
+                    if self._modal_gone_since is None:
+                        self._modal_gone_since = w.now
+                    elif (w.now - self._modal_gone_since >= self.MODAL_CLEAR_SECONDS
+                          and self.stats.recoveries < self.IDLE_RECOVER_MAX):
+                        self.stats.recoveries += 1
+                        self._silent_reason = ""
+                        self._modal_gone_since = None
+                        self._to("VERIFY", acts,
+                                 f"彈窗已消失 {self.MODAL_CLEAR_SECONDS:.0f} 秒 → 自動恢復"
+                                 f"（第 {self.stats.recoveries} 次）", w)
             return acts
 
         # 感知看門狗（FARM/DESCEND）
@@ -482,6 +505,7 @@ class NightWatchCore:
             self._last_exp_ts = w.now
         elif w.now - self._last_exp_ts > self.EXP_STALL_LIMIT:
             self._release_attack(acts)
+            self._silent_reason = "exp_stall"
             self._to("IDLE_SILENT", acts, "EXP 停滯過久（測謊視窗/異常？）→ 零輸入", w)
             return
 
@@ -625,6 +649,7 @@ class NightWatchCore:
         if w.hp is not None:
             drop = (self._idle_hp0 - w.hp) if self._idle_hp0 is not None else 0.0
             if w.hp < self.HP_ABORT or drop > self.IDLE_HP_DROP_SILENT:
+                self._silent_reason = "bleeding"
                 self._to("IDLE_SILENT", acts,
                          f"閒置中仍掉血（HP {w.hp:.0%}）→ 零輸入", w)
                 return
@@ -648,6 +673,20 @@ class NightWatchCore:
         if self._next_repos is not None and w.now >= self._next_repos:
             self._next_repos = w.now + self.rng.uniform(*self.IDLE_JUMP_EVERY)
             acts.append(Action("tap_jump"))
+
+
+def region_changed(prev, cur, thresh=1.5):
+    """比較兩張裁切區是否有變化，回傳 (是否變化, 要保留的新基準)。
+
+    重點：自動重新校準後 ROI 尺寸可能改變（實測 EXP 區寬度 220→224），
+    此時直接相減會 ValueError 崩潰。尺寸不同時不比較，只把新的當基準。
+    """
+    if prev is None or cur is None:
+        return False, cur
+    if getattr(prev, "shape", None) != getattr(cur, "shape", None):
+        return False, cur          # ROI 換尺寸 → 這幀不比較，重新建立基準
+    import numpy as _np
+    return bool(float(_np.abs(cur - prev).mean()) > thresh), cur
 
 
 def exp_per_hour(events, now, window=900.0):
@@ -788,7 +827,12 @@ class Perception:
             if abs(nw - ow) > ow * 0.4 or abs(nh - oh) > oh * 0.4:
                 new_rect = self.mm_rect
         self.mm_rect = new_rect or self.mm_rect
-        self.exp_roi_auto = exp_text_roi_from_bars(raw, hp, mp)
+        new_exp = exp_text_roi_from_bars(raw, hp, mp)
+        if new_exp and self.exp_roi_auto:
+            # 幾乎沒動就沿用舊的：避免每次重新校準都重建基準而漏掉一次比較
+            if all(abs(a - b) <= 6 for a, b in zip(new_exp, self.exp_roi_auto)):
+                new_exp = self.exp_roi_auto
+        self.exp_roi_auto = new_exp or self.exp_roi_auto
         if self.mm_rect:
             # 小地圖改用實測到的面板範圍（不再用固定 ROI + reference_size 換算）
             self.mm.roi = list(self.mm_rect)
@@ -846,13 +890,12 @@ class Perception:
         er = self.exp_roi_auto or (0, 0, 1, 1)
         el, et, ew, eh = (int(x) for x in er)
         crop = raw[et:et + eh, el:el + ew].astype(np.int16)
-        if self._prev_exp is not None:
-            if float(np.abs(crop - self._prev_exp).mean()) > 1.5:
-                w.exp_changed = True
-                self.exp_events.append(now)
-                if len(self.exp_events) > 4000:
-                    del self.exp_events[:2000]
-        self._prev_exp = crop
+        changed, self._prev_exp = region_changed(self._prev_exp, crop)
+        if changed:
+            w.exp_changed = True
+            self.exp_events.append(now)
+            if len(self.exp_events) > 4000:
+                del self.exp_events[:2000]
         info["exp_per_hour"] = exp_per_hour(self.exp_events, now)
 
         # 找怪（節流）
