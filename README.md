@@ -1,177 +1,79 @@
-# 楓之谷經典版 圖色辨識自動化腳本（maplestory-classic-bot）
+# 楓之谷經典版 圖色自動化腳本
 
-一套以**純電腦視覺（Computer Vision）** 為基礎的《楓之谷 經典版》自動化腳本**骨架**。不讀取、不修改遊戲記憶體，僅透過「**截圖 → 影像辨識 → 模擬鍵鼠**」的方式運作。
+純圖像辨識（截圖 → 辨識 → 模擬按鍵），**不讀取也不修改遊戲記憶體**。
+分層設計：感知（vision）→ 決策（可測試的純狀態機）→ 執行（送鍵薄層）。
 
-> ⚠️ **重要免責聲明（請務必詳讀）**
->
-> 本專案僅供**電腦視覺與自動化技術之學習研究**用途。使用任何自動化腳本操作線上遊戲，**幾乎必然違反遊戲服務條款（Terms of Service, ToS）**，並可能導致帳號遭到**永久停權（封號）** 或其他處分。
->
-> 作者與貢獻者**不對**任何因使用本專案而造成的帳號損失、資料損失或其他任何後果負責。**是否使用、如何使用，風險由使用者自行承擔。** 若你不接受此條件，請勿使用本專案。
->
-> 本專案**不附帶任何遊戲美術素材**；所有模板圖片需由使用者自行從自己的遊戲畫面擷取。
+> 僅供學習研究。使用自動化操作線上遊戲有風險（帳號處分），請自行評估。
 
----
+## 快速開始
 
-## 設計理念
-
-架構參考兩個開源專案的精神：
-
-- **MapleStoryAutoLevelUp**（純 CV 流程）：`截圖 →（小地圖定位 ＋ 血條找角色）→ 模板匹配打怪 → 自動解 rune／喝水／換頻`。全程不碰記憶體。
-- **Auto Maple**（三層解耦架構）：
-  - **routine（路線）** — 定義角色要走的路徑，以及在每個定位點要執行哪些動作。
-  - **command book（動作指令）** — 把「移動／攻擊／補水／換頻」等動作抽象成可組合、可替換的指令。
-  - **engine（執行引擎）** — 主迴圈，負責串接「擷取 → 辨識 → 輸入」。
-
-三層解耦的好處：換職業／換地圖時，只需改 routine 與 command book，引擎與辨識層可重用。
-
-### 資料流
-
-```
-┌──────────┐   frame   ┌──────────┐   偵測結果   ┌──────────┐   按鍵    ┌──────────┐
-│ capture  │ ────────▶ │  vision  │ ──────────▶ │  engine  │ ───────▶ │  input   │
-│ 螢幕擷取 │           │ 影像辨識 │             │ 決策迴圈 │          │ 鍵鼠模擬 │
-└──────────┘           └──────────┘             └────┬─────┘          └──────────┘
-                                                     │ 查表
-                                        ┌────────────┴────────────┐
-                                        ▼                         ▼
-                                  routine（路線）        commands（command book）
-```
-
----
-
-## 專案結構
-
-```
-maplestory-classic-bot/
-├── README.md                   # 本說明檔
-├── requirements.txt            # 相依套件
-├── .gitignore
-├── config/
-│   ├── settings.example.yaml   # 設定範例（視窗標題、按鍵、閾值…）
-│   └── routines/
-│       └── example.yaml        # 範例路線
-├── src/
-│   ├── main.py                 # 進入點：載入設定 → 啟動 engine（含 --dry-run/--demo-image）
-│   ├── capture/                # 螢幕擷取（mss / windows-capture 封裝）
-│   ├── vision/                 # 模板匹配、小地圖定位、血條讀值、怪物偵測、合成場景
-│   ├── input/                  # 鍵鼠模擬（pydirectinput / SendInput，含隨機延遲）
-│   ├── engine/                 # 主迴圈：感知→(補水/rune/打怪/巡邏)
-│   ├── routine/                # 路線資料模型與載入
-│   ├── commands/               # command book（移動/攻擊/走近…）＋ combat 攻擊決策
-│   └── rune/                   # rune 偵測與解謎（介面 + TODO）
-├── tools/
-│   ├── capture_template.py     # 小工具：框選截圖存成模板素材
-│   ├── hold_and_wiggle.py      # 簡易掛機：連點攻擊＋動靜偵測換邊＋防掉落/防失效（bat 啟動）
-│   └── tuner.py                # 調參 UI：邊跑邊調參數（熱載入）＋按鍵記錄量平台＋偵測預覽
-├── assets/
-│   └── templates/
-│       └── monsters/           # 放你自己的鱷魚截圖（見該資料夾 README；圖片不進版控）
-└── tests/
-    ├── test_smoke.py           # 煙霧測試（import／基本邏輯）
-    ├── test_combat.py          # 攻擊決策（純函式）
-    └── test_vision_functional.py  # 以合成影像實跑 OpenCV（模板/小地圖/血條/怪物/整合）
-```
-
----
-
-## Windows 快速上手（實際執行環境）
-
-最終在 Windows 上執行（需要 `pydirectinput` 送鍵、擷取實際遊戲畫面）。以下 PowerShell 步驟可直接照做：
-
-```powershell
-# 1) 進入專案資料夾
-cd D:\indexasia_David\maplestory-classic-bot
-
-# 2) 建立並啟用虛擬環境（需 Python 3.10+）
+```bash
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-
-# 3) 安裝相依套件（含 Windows 專屬的 pydirectinput）
-pip install -r requirements.txt
-
-# 4) 複製設定範例，之後再依你的視窗標題／按鍵微調
+.venv\Scripts\pip install -r requirements.txt
 copy config\settings.example.yaml config\settings.yaml
-
-# 5) 空轉測試：用合成畫面、不送實體按鍵，把主迴圈跑 4 圈
-python -m src.main --dry-run --max-loops 4
-
-# 6) 跑測試
-python -m pytest -q
 ```
 
-`--dry-run` 會使用合成畫面、只印出動作而不真的送鍵，所以**不必開遊戲、也不會亂點你的畫面**，很適合先確認流程是否正確。確認無誤後，開好遊戲、把視窗標題與按鍵填進 `settings.yaml`，再拿掉 `--dry-run` 正式執行：
+先開好遊戲並登入，再依需求選一支工具（`tools\` 下的 `.bat` 直接雙擊）：
 
-```powershell
-python -m src.main --config config\settings.yaml
+| 工具 | 用途 | 需要管理員 |
+|---|---|---|
+| `run_selftest.bat` | **端到端整備度檢查**（只看不送鍵，先跑這支） | 否 |
+| `run_control_panel_admin.bat` | **控制台**：即時預覽＋狀態儀表＋參數即時調＋開關 | 是 |
+| `run_overnight_admin.bat` | 守夜練等 daemon（長時間無人看管） | 是 |
+| `run_attack_only_admin.bat` | 凍結版：只按住攻擊＋自動點掉指定 buff，完全不移動 | 是 |
+| `run_collect_templates.bat` | 怪物模板採集（換地圖想用模板偵測時） | 否 |
+| `run_tuner_admin.bat` | 調參 UI＋量平台（按鍵記錄推算平台寬與走速） | 是 |
+
+> 遊戲多以管理員權限執行；沒有管理員權限時 Windows 會靜默丟棄模擬按鍵。
+
+## 設計重點
+
+**解析度無關**。世界辨識先把畫面正規化到基準尺寸再比對模板；UI（血條、
+小地圖、EXP）不隨解析度等比縮放，改為**每次啟動自動定位**——換視窗大小或
+解析度都不必重新校準。
+
+**決策與 I/O 分離**。所有安全規則都在 `tools/overnight.py` 的 `NightWatchCore`：
+它是純狀態機（感知快照進、動作清單出、時間由外部驅動），因此整晚流程能在
+毫秒內模擬，安全規則全部有對應測試（179 項）。
+
+**安全鐵則**（皆有測試）
+- 位置或平台讀不到 → 立刻放開攻擊鍵、不送任何移動鍵
+- 使用者實體按鍵 → 立刻讓手（低階鍵盤鉤子區分實體/注入按鍵）
+- 偵測到置中彈窗（測謊/符文/死亡）→ 零輸入並通知，**絕不自動作答**
+- EXP 長時間停滯 → 進入靜默，不再幫遊戲維持連線
+- 補血鍵未證實有效就不下去打怪（`heal_mode: external` 則交給寵物）
+- 每個離開戰鬥的轉換都先放開攻擊鍵；結束時釋放全部按鍵
+
+## 全職業支援
+
+`config/class_profiles.example.yaml` 提供弓箭手／法師／劍士／盜賊／海盜／
+不用技能六種範本，複製想要的貼進 `settings.yaml` 的 `class_profile:`。
+
+| 攻擊模式 | 適用 |
+|---|---|
+| `hold` | 按住攻擊鍵（弓箭手放箭、劍士平砍，輸出最大） |
+| `tap` | 固定間隔連點（單發技能） |
+| `rotate` | 技能輪替，依冷卻挑下一顆（法師等多技能職業） |
+
+另可設定 buff 自動重施、MP 自動補、自動撿物（各項留空即完全不碰該鍵）。
+
+## 感知能力
+
+| 模組 | 說明 |
+|---|---|
+| `ui_calibrate` | 自動定位 HP/MP 條、EXP 文字區、小地圖面板（解析度無關） |
+| `minimap` | 玩家點追蹤（亮度尖峰過濾裝飾物）、腳下平台左右端點量測 |
+| `monster` | 多模板匹配＋NMS，支援降取樣加速與模板尺度換算 |
+| `motion` | **免模板**的活動偵測（背景模型）：換任何地圖都能用 |
+| `modal` | 置中彈窗偵測（測謊/符文/死亡對話框） |
+| `edge_probe` | 畫面級邊緣探測：前方不是同種地面就不走 |
+
+## 開發
+
+```bash
+.venv\Scripts\python -m pytest -q tests        # 179 項
+.venv\Scripts\python tools\mutation_check.py   # 蓄意破壞安全規則，驗證測試咬得住
 ```
 
-> - 本骨架「**缺套件也能 import**」：未裝 `mss`／`opencv-python`／`pydirectinput` 時模組仍可載入，只有實際使用時才提示安裝，因此可先跑測試、看架構再補環境。
-> - `requirements.txt` 預設**不含** `windows-capture`（進階選用擷取後端）；預設的 `mss` 就能運作。
-> - 在 Linux／macOS 只能安裝跨平台套件（`opencv-python-headless`、`numpy`、`PyYAML`、`mss`、`pytest`）來跑測試與 `--dry-run`；送鍵與真實擷取需在 Windows 上驗證。
-
----
-
-## 使用方式
-
-1. **複製設定檔**：把 `config/settings.example.yaml` 複製成 `config/settings.yaml`，依你的遊戲視窗標題、按鍵綁定與畫面解析度調整。
-2. **建立模板素材**：經典版是高解析重繪，模板**必須用你自己遊戲畫面的實際截圖重建**。用內建工具框選存檔：
-
-   ```bash
-   python tools/capture_template.py --name slime --out assets/templates
-   ```
-3. **編輯路線**：參考 `config/routines/example.yaml` 定義走位與動作。
-4. **啟動**：
-
-   ```bash
-   python -m src.main --config config/settings.yaml
-   ```
-   預設熱鍵（可於設定檔調整）：`F12` 緊急停止。
-
----
-
-## 實戰設定：戰火之地・沼澤地 I（弓箭手打鱷魚）
-
-`config/settings.example.yaml` 的預設值取自這張地圖的**實際截圖**校準：
-
-- **視窗**：標題「新楓之谷」（完整為「新楓之谷 · 經典版」）。
-- **地圖**：戰火之地：沼澤地 I（Map ID 107000000），寬幅、大致平坦、橫向動線長 → 移動以**地面左右橫向巡邏**為主，到折返點前掉頭避免走進水裡。
-- **目標怪**：鱷魚 Croco Lv32（HP 1200 / 移速 −40 很慢 / 迴避 12 / 可擊退）。好瞄準、可風箏；HP 高，需要**對同側持續輸出到怪消失**。
-- **攻擊（弓箭手・遠程定點）**：偵測到鱷魚 → **面向怪較多的一側** → 站定放**主力技**連射；一次濺射／穿透打一排。
-  - 主力技（Lv30–40 二轉）：獵人(弓)＝**爆炸箭**（範圍濺射＋約60%暈眩）；弩手(弩)＝**貫穿箭**（直線穿透多隻＋冰凍）。攻擊鍵預設 **Ctrl**（`combat.attack_key`）。
-  - 「箭雨／亂射」是 3 轉技能，這個等級沒有，預設不使用。
-- **命中提醒**：鱷魚命中需求約 44，DEX／命中不足會 **miss**——畫面偵測得到、但實際打不中，請先顧好命中再讓腳本連續輸出。
-- **寵物排除**：畫面中的**白色兔子是寵物**，會跟在角色旁。怪物偵測用「鱷魚模板」比對，天生不會把兔子當鱷魚；另可用 `vision.monster.roi` 限定平台帶再保險。
-- **兩平台輪流清怪**（`combat.platforms`）：左、右兩個平台輪流巡邏。箭是水平飛的，用 `combat.attack_y_band` 只打「與角色同高度帶」的怪（同平台 dy≈+26、另一平台 dy≈+84，[0, 60] 剛好分開）；目前平台連續 `empty_loops` 圈沒可打的怪就走過去、到平台下方邊走邊跳上去，卡太久（`max_move_loops`）會放棄回守。平台座標用小地圖 (x, y) 判定，校準法見 settings 註解。
-
-感知資料流：`小地圖黃點→玩家座標`、`HP/MP 條 ROI→剩餘%`、`鱷魚模板匹配→鱷魚清單`，再交給攻擊/巡邏決策。dry-run（`--demo-image` 餵真截圖）實測輸出範例：
-
-```
-[loop 1] 視窗:「新楓之谷」 | 玩家(小地圖):(140, 12)  HP:76%  MP:36%  鱷魚:2
-        ↳ 打怪：偵測到 2 隻 → 最近(1070,514) dx=385 → 面向right → 放技能 ctrl×3
-```
-
-## 校準 HSV / ROI（換解析度或帳號務必重做）
-
-`settings.example.yaml` 內所有 ROI 都是「相對遊戲視窗左上角」的像素，參考視窗約 1370×865（含標題列）。你的解析度/視窗大小不同時請重新校準：
-
-1. **截一張你自己的遊戲畫面**（同你平常玩的視窗大小）。
-2. **ROI（矩形區域）**：用小畫家/看圖軟體讀出「小地圖地圖區」「HP 條」「MP 條」的 `[left, top, width, height]`，填入 `vision.minimap.roi` 與 `vision.health_bar.hp_bar_roi / mp_bar_roi`。
-   - 小技巧：HP/MP 條寬度可用「已知數值反推」——例如 HP 顯示 1010/1322≈76%，量出紅色填充寬度 ÷ 0.76 就是條總寬。
-3. **HSV 顏色**：若小地圖黃點抓不到、或血條讀值不準，微調對應的 `*_color_lower/upper`（OpenCV 的 H 是 0–179）。
-4. **怪物模板**：把鱷魚截圖放到 `assets/templates/monsters/`（多補不同動作/方向更準），需要時調 `vision.monster.match_threshold`（真實場景常用 0.55~0.70）。
-5. **巡邏邊界**：在遊戲裡走到平台左右端，看小地圖玩家 x 值，填 `combat.patrol_left_x / patrol_right_x`（設在水邊之前，避免掉下去）。
-6. **防掉落參數**（左右移動掉出平台時調這裡）：`combat.patrol_edge_margin` 折返點往內縮的安全邊界（平台越窄設越小）；`combat.turn_tap_seconds` 攻擊前轉向的極短按時間（按太久會邊轉邊走、貼邊打怪慢慢滑出去）；`vision.minimap.max_jump_px / reacquire_misses / stall_reset_loops` 玩家點跨圈追蹤（過濾小地圖上其他黃色標記造成的座標亂跳、鎖錯點時自動重定位）。
-7. **防攻擊失效**：定點站著打約 60 秒攻擊會失效，`combat.reposition_*` 控制「每 45~65 秒小步移動一下（往平台中心挪、絕不出邊界）＋那一輪換邊打」；`reposition_min_seconds: 0` 可關閉。
-8. **畫面邊緣探測（防掉落第二道防線）**：小地圖 1px ≈ 數十畫面 px、貼邊時太粗，`vision.edge_probe` 直接比較「角色腳下 vs 前方同高度」取樣區的平均色，前方不是同一種地面（水面/懸空）就不往那邊走；以腳下當基準免逐地圖校準。px 參數以 1371 寬視窗為準，視窗更大請等比放大。
-9. **不想要的 buff 自動點掉**：別人丟的「速度激發」等移速 buff 會讓步伐全部走過頭、一動就掉出平台。把要點掉的 buff 圖示截圖放進 `assets/templates/buffs/`（見該資料夾 README），`vision.buff_dispel` 偵測到就自動到右上角 buff 列按滑鼠右鍵移除。`tools/hold_and_wiggle.py` 亦支援（`--dispel-buff`，bat 已預設開啟）。
-10. **調參 UI**（`tools/run_tuner_admin.bat`）：視窗置頂、邊掛機邊調——參數存進 `config/tuning.yaml` 後，跑著的掛機工具 2 秒內自動套用（免重啟）。內建「量平台」：你手動從平台最左走到最右，UI 記錄方向鍵時長＋小地圖位移，算出平台寬、走路速度、「從中間走到邊要幾秒」，一鍵套用安全上限（edge_margin、max_step_seconds）。另有偵測預覽（人物定位／左右動靜／邊緣探測一鍵檢查）。
-
-## 開發狀態
-
-**已實作並用合成影像＋真實截圖驗證**：小地圖玩家定位、HP/MP 讀值、鱷魚多模板偵測＋NMS、弓箭手攻擊決策、**兩平台輪流清怪（同高度帶過濾＋跳上平台＋防卡死）**、平台巡邏、**防掉落（巡邏提前折返＋讀不到位置不盲走＋追怪邊界保險＋小地圖玩家點跨圈追蹤去誤判＋畫面邊緣探測第二防線）**、**防攻擊失效（定時小步移動＋換邊打）**、**不想要的 buff 自動右鍵點掉（速度激發等）**、整條 dry-run 感知→決策。**仍為 TODO**：`windows-capture` 後端、以 ctypes 定位遊戲視窗、rune 解謎的箭頭辨識。詳見各模組 docstring。
-
----
-
-## 授權
-
-僅供學習研究，無任何品質或適用性保證（AS IS）。使用前請再次閱讀上方免責聲明。
+`tools/selftest.py` 會在真實畫面上跑完整迴圈但不送鍵，輸出每個子系統的
+讀取成功率與核心「會做什麼動作」——改動後先跑這支確認沒有壞掉。
