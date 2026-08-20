@@ -51,6 +51,7 @@ class WorldState:
     pos: Optional[Tuple[int, int]] = None
     span: Optional[dict] = None
     hp: Optional[float] = None
+    mp: Optional[float] = None
     exp_changed: bool = False
     buff_hit: Optional[Tuple[int, int]] = None
     cmd: str = ""
@@ -73,6 +74,50 @@ class Stats:
     descents: int = 0
     yields: int = 0
     recoveries: int = 0
+    buffs_cast: int = 0
+    mp_potions: int = 0
+    skills_cast: int = 0
+
+
+@dataclass
+class ClassProfile:
+    """職業設定：不同職業的攻擊方式、buff、MP 需求都不一樣。
+
+    attack_mode:
+        hold   —— 按住攻擊鍵（弓箭手/多數平砍職業最大輸出）
+        tap    —— 固定間隔連點（「按一下打一下」的技能）
+        rotate —— 技能輪替（法師/騎士等有多顆技能與冷卻）
+    rotation: [(鍵, 冷卻秒數), ...]；rotate 模式依冷卻挑下一顆可用技能。
+    buffs:    [(鍵, 每幾秒重施), ...]；FARM 期間到期就補。
+    """
+    name: str = "generic"
+    attack_mode: str = "hold"
+    attack_key: str = "ctrl"
+    attack_interval: float = 0.15
+    rotation: tuple = ()
+    buffs: tuple = ()
+    mp_key: Optional[str] = None
+    mp_threshold: float = 0.30
+    mp_cooldown: float = 2.5
+
+    @classmethod
+    def from_config(cls, cfg):
+        c = (cfg or {})
+        atk = c.get("attack") or {}
+        mp = c.get("mp") or {}
+        rot = tuple((r.get("key"), float(r.get("cooldown", 1.0)))
+                    for r in (atk.get("rotation") or []) if r.get("key"))
+        buffs = tuple((b.get("key"), float(b.get("every", 180)))
+                      for b in (c.get("buffs") or []) if b.get("key"))
+        return cls(
+            name=c.get("name", "generic"),
+            attack_mode=atk.get("mode", "hold"),
+            attack_key=atk.get("key", "ctrl"),
+            attack_interval=float(atk.get("interval", 0.15)),
+            rotation=rot, buffs=buffs,
+            mp_key=mp.get("potion_key"),
+            mp_threshold=float(mp.get("threshold", 0.30)),
+            mp_cooldown=float(mp.get("cooldown", 2.5)))
 
 
 class NightWatchCore:
@@ -113,7 +158,10 @@ class NightWatchCore:
                          "pagedown", "shift")
 
     def __init__(self, max_seconds=7.5 * 3600, potion_key="delete", rng=None,
-                 potion_candidates=None, heal_mode="self", last_resort_hp=0.20):
+                 potion_candidates=None, heal_mode="self", last_resort_hp=0.20,
+                 profile: Optional["ClassProfile"] = None):
+        # 職業設定：攻擊方式/技能輪替/buff/MP 都因職業而異
+        self.profile = profile or ClassProfile()
         # heal_mode="external"：補血由寵物/使用者負責——核心完全不碰藥水鍵、
         # 不做藥效驗證、也不因低血停手（只保留 last_resort_hp 最後保險）
         self.heal_mode = heal_mode
@@ -156,6 +204,10 @@ class NightWatchCore:
         self._clean_since: Optional[float] = None
         self.facing: Optional[str] = None      # 目前面向（依怪物分佈決定）
         self._last_turn = 0.0
+        self._buff_due = {}          # 鍵 → 下次施放時間
+        self._skill_ready = {}       # 技能鍵 → 下次可用時間
+        self._next_tap = 0.0         # tap 模式的下一次攻擊時間
+        self._last_mp_potion = 0.0
 
     # ---- 主入口 ----
     def tick(self, w: WorldState) -> List[Action]:
@@ -450,14 +502,12 @@ class NightWatchCore:
             acts.append(Action("turn", self.facing))
             acts.append(Action("log", f"沒有經驗值進帳 → 轉向{self.facing}試"))
 
-        # 攻擊保持
-        if not self._atk_held:
-            acts.append(Action("hold_attack"))
-            self._atk_held = True
-            self._atk_refresh = w.now + self.rng.uniform(*self.ATTACK_REPRESS)
-        elif w.now >= self._atk_refresh:
-            acts.append(Action("repress_attack"))
-            self._atk_refresh = w.now + self.rng.uniform(*self.ATTACK_REPRESS)
+        # buff 與 MP（職業設定驅動）
+        self._buff_logic(w, acts)
+        self._mp_logic(w, acts)
+
+        # 攻擊：依職業設定分派（按住／連點／技能輪替）
+        self._attack_logic(w, acts)
 
         # 平台警衛
         if w.now - self._last_guard >= self.GUARD_EVERY:
@@ -484,6 +534,54 @@ class NightWatchCore:
         if w.buff_hit is not None and w.now - self._last_dispel >= self.DISPEL_EVERY:
             self._last_dispel = w.now
             acts.append(Action("right_click", w.buff_hit))
+
+    # ---- 職業行為（攻擊/ buff / MP）----
+    def _attack_logic(self, w, acts):
+        p = self.profile
+        if p.attack_mode == "hold":
+            if not self._atk_held:
+                acts.append(Action("hold_attack"))
+                self._atk_held = True
+                self._atk_refresh = w.now + self.rng.uniform(*self.ATTACK_REPRESS)
+            elif w.now >= self._atk_refresh:
+                acts.append(Action("repress_attack"))
+                self._atk_refresh = w.now + self.rng.uniform(*self.ATTACK_REPRESS)
+            return
+        # 非按住模式：先確保攻擊鍵沒被按著
+        self._release_attack(acts)
+        if p.attack_mode == "rotate" and p.rotation:
+            for key, cd in p.rotation:          # 依設定順序挑第一顆冷卻好的
+                if w.now >= self._skill_ready.get(key, 0.0):
+                    acts.append(Action("tap", key))
+                    self._skill_ready[key] = w.now + cd
+                    self.stats.skills_cast += 1
+                    return
+            return                               # 全在冷卻 → 這圈不動作
+        # tap 模式：固定間隔連點（帶輕微抖動，不像碼表）
+        if w.now >= self._next_tap:
+            acts.append(Action("tap", p.attack_key))
+            self.stats.skills_cast += 1
+            self._next_tap = w.now + p.attack_interval * self.rng.uniform(0.85, 1.25)
+
+    def _buff_logic(self, w, acts):
+        """到期就補 buff（每個 buff 各自的重施間隔）。"""
+        for key, every in self.profile.buffs:
+            due = self._buff_due.get(key)
+            if due is None or w.now >= due:
+                acts.append(Action("tap", key))
+                self._buff_due[key] = w.now + every
+                self.stats.buffs_cast += 1
+                return                           # 一圈只補一顆，避免連打一串
+
+    def _mp_logic(self, w, acts):
+        """MP 不足就補（法師等吃 MP 的職業必要）。"""
+        p = self.profile
+        if not p.mp_key or w.mp is None:
+            return
+        if w.mp < p.mp_threshold and w.now - self._last_mp_potion >= p.mp_cooldown:
+            acts.append(Action("tap", p.mp_key))
+            self._last_mp_potion = w.now
+            self.stats.mp_potions += 1
 
     def _tick_idle_safe(self, w, acts):
         self._release_attack(acts)
@@ -685,7 +783,8 @@ class Perception:
         w.pos = pos
         w.span = self.mm.platform_span(raw, pos) if pos else None
         w.hp = self.hp_reader.read(raw)
-        info["mp"] = self.mp_reader.read(raw)
+        w.mp = self.mp_reader.read(raw)
+        info["mp"] = w.mp
 
         # EXP 變化（同時記錄時間戳供估算每小時進帳）
         er = self.exp_roi_auto or (0, 0, 1, 1)
@@ -974,7 +1073,10 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
             log(str(a.arg))
 
     heal_mode = cfg.get("survival", {}).get("heal_mode", "self")
-    core = NightWatchCore(max_seconds=max_seconds,
+    profile = ClassProfile.from_config(cfg.get("class_profile"))
+    log(f"職業設定：{profile.name}｜攻擊 {profile.attack_mode}"
+        f"｜buff {len(profile.buffs)} 顆｜MP {'有' if profile.mp_key else '無'}")
+    core = NightWatchCore(max_seconds=max_seconds, profile=profile,
                           potion_key=cfg["keys"].get("hp_potion", "delete"),
                           heal_mode=heal_mode,
                           last_resort_hp=float(cfg.get("survival", {})

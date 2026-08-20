@@ -1,0 +1,82 @@
+# ============================================================
+#  全職業設定範本 —— 複製你要的那段貼進 settings.yaml 的 class_profile:
+#
+#  三種攻擊模式：
+#    hold   按住攻擊鍵不放。平砍型（弓箭手放箭、劍士砍）輸出最大。
+#    tap    固定間隔連點。適合「按一下放一次」的技能。
+#    rotate 技能輪替：依設定順序挑「冷卻好了」的第一顆放。法師/騎士等
+#           有多顆技能與冷卻時用這個。
+#
+#  ★ 所有按鍵都要對應你遊戲裡的實際設定（技能欄拖到哪個鍵就填哪個）。
+#     buffs 的 every 是「幾秒重施一次」，建議填技能持續時間的 8 成。
+# ============================================================
+
+# ---------- 弓箭手 / 獵人 / 弩手 ----------
+# 遠程平射，按住輸出最大；集中類 buff 定時補。
+archer:
+  name: "archer"
+  attack:
+    mode: "hold"
+    key: "ctrl"
+  buffs:
+    - {key: "f1", every: 180}    # 例：集中
+    - {key: "f2", every: 240}    # 例：銳利之眼
+  mp: {potion_key: "end", threshold: 0.25, cooldown: 3}
+
+# ---------- 法師 ----------
+# 吃 MP、技能有冷卻 → 用 rotate；MP 門檻設高一點免得空藍。
+mage:
+  name: "mage"
+  attack:
+    mode: "rotate"
+    rotation:
+      - {key: "shift", cooldown: 6}    # 例：範圍主力技
+      - {key: "ctrl", cooldown: 0.8}   # 例：單體/補刀
+  buffs:
+    - {key: "f1", every: 200}    # 例：魔法護甲
+    - {key: "f2", every: 280}    # 例：加速術
+  mp: {potion_key: "end", threshold: 0.40, cooldown: 2.5}
+
+# ---------- 劍士 / 戰士 ----------
+# 近戰：怪要貼身，攻擊按住即可；buff 多。
+warrior:
+  name: "warrior"
+  attack:
+    mode: "hold"
+    key: "ctrl"
+  buffs:
+    - {key: "f1", every: 150}    # 例：怒吼
+    - {key: "f2", every: 200}    # 例：武器加成
+    - {key: "f3", every: 240}
+  mp: {potion_key: "end", threshold: 0.20, cooldown: 3}
+
+# ---------- 盜賊 ----------
+# 飛鏢/短劍多為單發技能 → tap；匿蹤類 buff 要補。
+thief:
+  name: "thief"
+  attack:
+    mode: "tap"
+    key: "ctrl"
+    interval: 0.18
+  buffs:
+    - {key: "f1", every: 180}
+    - {key: "f2", every: 240}
+  mp: {potion_key: "end", threshold: 0.25, cooldown: 3}
+
+# ---------- 海盜 ----------
+pirate:
+  name: "pirate"
+  attack:
+    mode: "tap"
+    key: "ctrl"
+    interval: 0.16
+  buffs:
+    - {key: "f1", every: 180}
+  mp: {potion_key: "end", threshold: 0.25, cooldown: 3}
+
+# ---------- 完全不用技能（最保守） ----------
+plain:
+  name: "plain"
+  attack: {mode: "hold", key: "ctrl"}
+  buffs: []
+  mp: {}

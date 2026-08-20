@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from tools.overnight import NightWatchCore, Perception  # noqa: E402
+from tools.overnight import ClassProfile, NightWatchCore, Perception  # noqa: E402
 
 PREVIEW_W = 760          # 預覽圖寬度（等比縮放）
 
@@ -37,7 +37,8 @@ class Worker:
         self.snap = {"state": "STOPPED", "hp": None, "pos": None, "span": None,
                      "monsters": [], "anchor": None, "same_layer": 0,
                      "exp_count": 0, "exp_per_hour": 0.0, "facing": None,
-                     "frame": None, "y_band": (-60, 60), "acting": False}
+                     "frame": None, "y_band": (-30, 30), "acting": False,
+                     "mp": None, "profile": "—", "calibrated": False}
         self.cmd = ""                 # farm / idle / stop
         self.params = {}              # 由 UI 寫入，每圈套用
         self.running = False
@@ -97,12 +98,19 @@ class Worker:
                 self.acting = False
 
         surv = cfg.get("survival", {})
+        profile = ClassProfile.from_config(cfg.get("class_profile"))
         self._core = NightWatchCore(
             max_seconds=8 * 3600,
             potion_key=cfg["keys"].get("hp_potion", "delete"),
             heal_mode=surv.get("heal_mode", "external"),
-            last_resort_hp=float(surv.get("last_resort_hp", 0.20)))
-        self.log(f"控制台啟動｜補血模式 {self._core.heal_mode}｜"
+            last_resort_hp=float(surv.get("last_resort_hp", 0.20)),
+            profile=profile)
+        with self.lock:
+            self.snap["profile"] = (f"{profile.name}／{profile.attack_mode}"
+                                    f"／buff {len(profile.buffs)}"
+                                    f"／MP {'有' if profile.mp_key else '無'}")
+        self.log(f"控制台啟動｜職業 {profile.name}（{profile.attack_mode}）｜"
+                 f"補血 {self._core.heal_mode}｜"
                  f"{'送鍵' if self.acting else '只看不送鍵'}")
 
         held = set()
@@ -185,6 +193,7 @@ class Worker:
                         "facing": self._core.facing, "frame": frame,
                         "y_band": tuple(self._per.y_band), "acting": self.acting,
                         "anchor_score": info["anchor_score"],
+                        "mp": info.get("mp"), "calibrated": info.get("calibrated"),
                         "stats": dict(vars(self._core.stats)),
                     })
                 time.sleep(max(0.05, float(self.params.get("tick", 0.35))))
@@ -280,7 +289,8 @@ def main():
     stat = {}
     ttk.Label(right, text="狀態", font=("", 11, "bold")).grid(
         column=0, row=0, columnspan=2, sticky="w")
-    rows = [("state", "狀態機"), ("acting", "送鍵"), ("hp", "HP"),
+    rows = [("state", "狀態機"), ("acting", "送鍵"), ("profile", "職業"),
+            ("calib", "UI 校準"), ("hp", "HP"), ("mp", "MP"),
             ("pos", "小地圖位置"), ("plat", "腳下平台"), ("same", "同層怪數"),
             ("facing", "面向"), ("exp", "EXP 進帳"), ("eph", "EXP/小時"),
             ("anchor", "角色定位")]
@@ -369,8 +379,12 @@ def main():
         st = s.get("state", "STOPPED")
         stat["state"].set(st)
         stat["acting"].set("是（會操控角色）" if s.get("acting") else "否（只看）")
+        stat["profile"].set(str(s.get("profile", "—")))
+        stat["calib"].set("完成" if s.get("calibrated") else "校準中…")
         hp = s.get("hp")
         stat["hp"].set("讀不到" if hp is None else f"{hp:.0%}")
+        mp = s.get("mp")
+        stat["mp"].set("讀不到" if mp is None else f"{mp:.0%}")
         stat["pos"].set(str(s.get("pos") or "讀不到"))
         span = s.get("span")
         stat["plat"].set("讀不到" if not span else
