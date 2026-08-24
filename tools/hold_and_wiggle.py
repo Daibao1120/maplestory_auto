@@ -162,7 +162,9 @@ class HoldWiggle:
                  move_time=0.18, attack_interval=0.22, patrol_steps=2,
                  attack_facing="left", enable_move=True, refocus=True,
                  jump_in_place=False, jump_key="alt",
-                 edge_guard=False, edge_margin=6, dry_run=False):
+                 edge_guard=False, edge_margin=6,
+                 sweep=False, sweep_steps=8, step_interval=0.45, start_paused=False,
+                 dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
         self.interval_max = float(interval_max)
@@ -182,6 +184,13 @@ class HoldWiggle:
         self._edge_center = None                    # 起始中心 x：移動一律往這裡回歸（小平台最安全）
         self._last_x = None                         # 最近一次成功讀到的玩家 x（抓不到時的後備）
         self.max_jump = max(25, self.edge_margin * 4)  # x 一次跳超過這麼多 px 視為誤判、丟棄
+        # 掃蕩模式（左右來回走、邊走邊打，攻擊朝走的方向）——寬地面平台打蛇用
+        self.sweep = sweep
+        self.sweep_steps = max(1, int(sweep_steps))  # 單邊走幾步就折返（掃蕩範圍）
+        self.step_interval = float(step_interval)    # 每隔幾秒走一步（步與步之間持續攻擊）
+        self.start_paused = start_paused             # 啟動先待命，按 Ctrl 才開始
+        self._sweep_pos = 0
+        self._sweep_dir = 1                          # +1 右 / -1 左
         self.refocus = refocus                      # 焦點被搶走時自動切回楓之谷
         self.dry_run = dry_run
         self._hwnd = None
@@ -342,6 +351,17 @@ class HoldWiggle:
         print(f"  ↻ 巡邏挪一步 {arrow}（位置 {self._patrol_pos:+d}/±{self.patrol_steps}）{refaced} → 接回攻擊")
         time.sleep(random.uniform(0.05, 0.12))
 
+    def _sweep_step(self):
+        """掃蕩：往目前方向走一步（走到 ±sweep_steps 折返）。走完面向=走的方向，
+        所以接著的攻擊自然朝走的那一邊（看到蛇就打到）。"""
+        direction = "right" if self._sweep_dir > 0 else "left"
+        self._tap(direction, hold=self.move_time + random.uniform(-0.02, 0.02))
+        self._sweep_pos += self._sweep_dir
+        if self._sweep_pos >= self.sweep_steps:
+            self._sweep_dir = -1
+        elif self._sweep_pos <= -self.sweep_steps:
+            self._sweep_dir = 1
+
     def _move_edge_guarded(self):
         """往起始中心回歸（不走去邊界）——小平台最安全的移動。
 
@@ -411,7 +431,10 @@ class HoldWiggle:
                     self._edge_hi = sx + self.edge_margin
                     print(f"  ✓ edge-guard 啟用：中心 x={sx}（移動一律往這裡回歸，貼著中心不往外走）")
 
-        if self.edge_guard:
+        if self.sweep:
+            move_desc = (f"左右來回掃蕩打蛇（單邊 {self.sweep_steps} 步、每 {self.step_interval:.2f}s 一步，"
+                         f"攻擊朝走的方向）")
+        elif self.edge_guard:
             move_desc = (f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏，"
                          f"用小地圖真實 x 到邊界折返（不會走出平台）")
         else:
@@ -419,21 +442,26 @@ class HoldWiggle:
                 f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，移動後轉回攻擊方向）"
         print("=" * 56)
         print(f" 連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）；{move_desc}")
-        print(f" 接手換邊=方向鍵暫停→轉向→Ctrl恢復 | 結束=F12")
+        _start = "按 Ctrl 開始" if self.start_paused else "自動開始"
+        print(f" {_start} | 你按方向鍵=接手暫停 | 結束=F12")
         if self.dry_run:
             print(" [dry-run] 只印節奏、不送實體按鍵")
         print("=" * 56)
 
-        state = "RUNNING"
+        state = "PAUSED" if self.start_paused else "RUNNING"
         cycle_start = time.time()
         wait = self._next_interval()
         last_attack = 0.0
-        # 開場不強制轉向——沿用你啟動時角色本來面對的方向。attack_facing 只是假設值，
-        # 你手動換邊（暫停→轉向→Ctrl 恢復）後會自動更新成你最後面對的方向。
-        _f = '左' if self.attack_facing == 'left' else '右'
-        if self.enable_move:
+        last_step = 0.0
+        if state == "PAUSED":
+            print("  ⏸ 待命中 → 站好位置後按 Ctrl 開始（你按方向鍵=接手 / F12=結束）")
+        elif self.sweep:
+            print("  開始左右來回掃蕩打蛇")
+        elif self.enable_move:
+            _f = '左' if self.attack_facing == 'left' else '右'
             print(f"  開始攻擊（假設朝{_f}，手動換邊會跟著更新）；下次移動：{wait:.0f} 秒後")
         else:
+            _f = '左' if self.attack_facing == 'left' else '右'
             print(f"  開始攻擊（假設朝{_f}，手動換邊會跟著更新，不移動）")
         try:
             while True:
@@ -492,7 +520,16 @@ class HoldWiggle:
                         self._pause_announced = False
 
                     now = time.time()
-                    if self.enable_move and now - cycle_start >= wait:
+                    if self.sweep:
+                        # 掃蕩：定時走一步（面向=走的方向），步與步之間持續攻擊
+                        if now - last_step >= self.step_interval:
+                            self._sweep_step()
+                            last_step = now
+                            last_attack = 0.0   # 走完馬上朝走的方向打
+                        elif now - last_attack >= self.attack_interval:
+                            self._attack_once()
+                            last_attack = time.time()
+                    elif self.enable_move and now - cycle_start >= wait:
                         self._move()
                         cycle_start = time.time()
                         wait = self._next_interval()
@@ -525,9 +562,13 @@ class HoldWiggle:
                         cycle_start = time.time()
                         wait = self._next_interval()
                         last_attack = 0.0
-                        _f = '左' if self.attack_facing == 'left' else '右'
-                        print(f"  ▶ 已恢復攻擊（朝{_f}）。" +
-                              (f"下次移動：{wait:.0f} 秒後" if self.enable_move else ""))
+                        last_step = 0.0
+                        if self.sweep:
+                            print("  ▶ 開始／恢復左右掃蕩打蛇")
+                        else:
+                            _f = '左' if self.attack_facing == 'left' else '右'
+                            print(f"  ▶ 已恢復攻擊（朝{_f}）。" +
+                                  (f"下次移動：{wait:.0f} 秒後" if self.enable_move else ""))
 
                 time.sleep(self.POLL)
         except KeyboardInterrupt:
@@ -572,6 +613,14 @@ def parse_args(argv=None):
                    help="改用『原地跳』重定位（直上直下不位移，小平台不會掉下去）")
     p.add_argument("--jump-key", default="alt", choices=sorted(_SCAN),
                    help="跳躍鍵（預設 alt）")
+    p.add_argument("--sweep", action="store_true",
+                   help="掃蕩模式：左右來回走、邊走邊打，攻擊朝走的方向（寬地面平台打蛇用）")
+    p.add_argument("--sweep-steps", type=int, default=8,
+                   help="掃蕩單邊走幾步就折返（預設 8）；平台越寬設越大")
+    p.add_argument("--step-interval", type=float, default=0.45,
+                   help="掃蕩每隔幾秒走一步（預設 0.45）；步與步之間持續攻擊")
+    p.add_argument("--start-paused", action="store_true",
+                   help="啟動先待命，按 Ctrl 才開始（站好位置再啟動）")
     p.add_argument("--no-move", action="store_true",
                    help="完全不移動，只連點攻擊（只想定點刷攻擊時用）")
     p.add_argument("--no-refocus", action="store_true",
@@ -595,7 +644,9 @@ def main(argv=None):
                     attack_facing=args.face, enable_move=not args.no_move,
                     refocus=not args.no_refocus, jump_in_place=args.jump_in_place,
                     jump_key=args.jump_key, edge_guard=args.edge_guard,
-                    edge_margin=args.edge_margin, dry_run=args.dry_run)
+                    edge_margin=args.edge_margin, sweep=args.sweep,
+                    sweep_steps=args.sweep_steps, step_interval=args.step_interval,
+                    start_paused=args.start_paused, dry_run=args.dry_run)
     return hw.run(args.window)
 
 
