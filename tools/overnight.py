@@ -62,6 +62,10 @@ class WorldState:
     mon_hint: Optional[str] = None
     # 置中彈窗（測謊/符文/死亡對話框）；偵測到就立刻零輸入等使用者處理
     modal: Optional[tuple] = None
+    # 彈窗偵測這一幀是否真的跑過。modal=None 同時代表「這幀沒彈窗」與
+    # 「偵測根本沒接上」，安全含意天差地遠，必須分開。沒有這個旗標時
+    # 一律當作「不知道」，也就是最保守的那一側。
+    modal_ok: bool = False
     # 同層附近的其他玩家人數（搶怪/被檢舉風險）
     others_near: int = 0
 
@@ -163,6 +167,12 @@ class NightWatchCore:
     PATROL_MIN_WIDTH = 12.0     # 平台至少這麼寬才巡邏（窄島一律不動）
     PATROL_SAFE_MARGIN = 4.0    # 走完後距離邊緣至少要保留這麼多
     EXP_STALL_LIMIT = 480.0
+    # 停滯靜候多久後再試一次。停滯的原因分兩類，我們分不出來：
+    #   (a) 有看不見的彈窗擋著（測謊）→ 必須零輸入
+    #   (b) 怪不刷/面向錯/掉到別層 → 重新驗證就能救回來
+    # 先零輸入靜候（對 (a) 安全），再有限次數重試（對 (b) 不浪費整夜）。
+    EXP_STALL_RETRY_WAIT = 90.0
+    EXP_STALL_RETRY_MAX = 3       # 重試用完才永久停手
     # 用「經驗值有沒有進帳」當回饋來決定面向：打得到怪就會有 EXP，久久沒進帳
     # 就轉向另一邊試。這比幾何判斷可靠——不需要知道角色在畫面哪個像素，
     # 而角色螢幕位置會隨鏡頭夾邊變動（實測不同地圖偏移 120~200px）。
@@ -225,7 +235,13 @@ class NightWatchCore:
         self._farm_y: Optional[int] = None
         self._descend_count = 0
         self._last_descend = 0.0
-        self._last_exp_ts: Optional[float] = None
+        self._last_exp_ts: Optional[float] = None   # 翻向冷卻用（翻向時會重設）
+        # 停滯 watchdog 專用時鐘：只有「真的有經驗值進帳」才會重設。
+        # 兩者曾共用一個變數，而盲翻每 20 秒重設它 → 480 秒的停滯 watchdog
+        # 永遠不可能觸發，整夜零進帳也不會停手（tests/test_watchdog_bugs.py）。
+        self._last_exp_real: Optional[float] = None
+        self._stall_retries = 0
+        self._stall_since: Optional[float] = None
         self._idle_entered = 0.0
         self._idle_hp0: Optional[float] = None
         self._clean_since: Optional[float] = None
@@ -317,6 +333,23 @@ class NightWatchCore:
                         self._to("VERIFY", acts,
                                  f"彈窗已消失 {self.MODAL_CLEAR_SECONDS:.0f} 秒 → 自動恢復"
                                  f"（第 {self.stats.recoveries} 次）", w)
+            elif self._silent_reason == "exp_stall" and w.modal_ok and not w.modal:
+                # 停滯靜默是「看不見的測謊視窗」的代理偵測，所以只有在彈窗偵測
+                # 確實在運作、而且明確說「畫面上沒有彈窗」時才准恢復。偵測沒接上
+                # （modal_ok=False）就永遠不恢復——寧可白掛一夜，不冒被標記的險。
+                # 重試額度獨立於彈窗恢復額度：一個是安全事件、一個是效率事件，
+                # 共用一個計數會讓其中一種把另一種的額度吃光。
+                if (self._stall_since is not None
+                        and w.now - self._stall_since >= self.EXP_STALL_RETRY_WAIT
+                        and self._stall_retries < self.EXP_STALL_RETRY_MAX):
+                    self._stall_retries += 1
+                    self._silent_reason = ""
+                    self._stall_since = None
+                    self._last_exp_real = w.now
+                    self._last_exp_ts = w.now
+                    self._to("VERIFY", acts,
+                             f"停滯靜候 {self.EXP_STALL_RETRY_WAIT:.0f} 秒 → 重新驗證再試"
+                             f"（第 {self._stall_retries}/{self.EXP_STALL_RETRY_MAX} 次）", w)
             return acts
 
         # 遇人：同層附近有其他玩家（搶怪/被檢舉風險）
@@ -371,6 +404,7 @@ class NightWatchCore:
         self.state = state
         if state == "FARM":
             self._last_exp_ts = None          # 重入不吃舊時間戳（防假性停滯）
+            self._last_exp_real = None
             self._next_repos = w.now + self.rng.uniform(*self.REPOS_EVERY)
         elif state == "DESCEND":
             self._descend_count = 0           # 每回合獨立步數預算
@@ -530,11 +564,16 @@ class NightWatchCore:
         # EXP 停滯（測謊視窗代理）→ 危險靜默
         if self._last_exp_ts is None:
             self._last_exp_ts = w.now
+        if self._last_exp_real is None:
+            self._last_exp_real = w.now
         if w.exp_changed:
             self._last_exp_ts = w.now
-        elif w.now - self._last_exp_ts > self.EXP_STALL_LIMIT:
+            self._last_exp_real = w.now
+            self._stall_retries = 0        # 有進帳＝真的在打 → 重試額度歸零
+        elif w.now - self._last_exp_real > self.EXP_STALL_LIMIT:
             self._release_attack(acts)
             self._silent_reason = "exp_stall"
+            self._stall_since = w.now
             self._to("IDLE_SILENT", acts, "EXP 停滯過久（測謊視窗/異常？）→ 零輸入", w)
             return
 
