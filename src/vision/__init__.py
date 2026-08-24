@@ -6,6 +6,7 @@ from src.vision.health_bar import HealthBarDetector
 from src.vision.monster import MonsterDetector, Detection
 from src.vision.edge_probe import probe_ahead_safe
 from src.vision.player_anchor import PlayerAnchor, search_window
+from src.vision.exp_meter import region_changed, exp_per_hour
 from src.vision.ui_calibrate import (find_bar, find_minimap_rect, longest_run,
                                      BarReader, find_exp_bar, exp_text_roi,
                                      exp_text_roi_from_bars,
@@ -16,6 +17,7 @@ from src.vision.modal import (ModalWatcher, find_modal, centrality,
 from src.vision.synthetic import build_demo, DemoScene
 
 __all__ = [
+    "region_changed", "exp_per_hour",
     "TemplateMatcher", "Match",
     "MinimapLocator", "PlayerTracker", "Rect", "find_platform_run",
     "HealthBarDetector",

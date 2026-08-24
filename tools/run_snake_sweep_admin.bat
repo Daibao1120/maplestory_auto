@@ -65,10 +65,16 @@ REM                           in front, walks faster when the area is cleared, a
 REM                           turns back early when the monsters are behind you.
 REM                           Only changes TIMING -- it never flips your facing
 REM                           while standing still.
+REM   --meter                 every minute, prints how many EXP ticks per hour you
+REM                           are getting. It is a PROXY for kill rate (it watches
+REM                           the EXP number change), not real EXP -- the point is
+REM                           that you can compare setting A vs B with a number
+REM                           instead of a feeling. Run 10 min, note it, change one
+REM                           thing, run 10 min again.
 REM   --dispel-buff           right-clicks away speed boosts (they make every step
 REM                           overshoot and walk you off the platform)
 REM   --no-refocus            pauses (does not steal focus) when you click away
-%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.10 --sweep --sweep-steps 10 --step-interval 0.45 --move-time 0.25 --start-paused --edge-guard --edge-margin 40 --adaptive-sweep --dispel-buff --no-refocus
+%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.10 --sweep --sweep-steps 10 --step-interval 0.45 --move-time 0.25 --start-paused --edge-guard --edge-margin 40 --adaptive-sweep --meter --dispel-buff --no-refocus
 
 echo.
 echo Finished. Press any key to close.

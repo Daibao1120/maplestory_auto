@@ -334,6 +334,7 @@ class HoldWiggle:
                  alternate_face=True, swap_every=1,
                  smart_face=True, shuffle=False, sweep=False, sweep_steps=8,
                  step_interval=0.45, start_paused=False, adaptive_sweep=False,
+                 meter=False,
                  tuning_path=None, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
@@ -384,6 +385,15 @@ class HoldWiggle:
         self._dwell = 1.0                             # 目前的停留倍率（快取）
         self._dwell_next = 0.0                        # 下次量動靜的時間
         self._since_turn = 0                          # 這個方向已走幾步（折返遲滯用）
+        self.meter = meter and not dry_run            # 戰績計：估打怪頻率，用來比較設定
+        self._meter_roi = None                        # EXP 數字區（自動定位）
+        self._meter_prev = None
+        self._meter_events = []
+        self._meter_next = 0.0
+        self._meter_report = 0.0
+        self._meter_steps = 0
+        self._meter_t0 = None
+        self._meter_off = False
         self.dispel_buff = dispel_buff              # True = 偵測「要點掉的 buff」（如速度激發）並右鍵移除
         self.dispel_interval = float(dispel_interval)
         # 防攻擊失效的關鍵是「真的換邊打」：挪步後朝新的一側持續輸出到下一次
@@ -895,6 +905,85 @@ class HoldWiggle:
         time.sleep(0.05)
         return _user32.GetForegroundWindow() == self._hwnd
 
+    METER_EVERY = 1.0           # 每隔幾秒看一次 EXP 數字區有沒有變
+    METER_REPORT_EVERY = 60.0   # 每隔幾秒回報一次戰績
+
+    def _meter_locate(self):
+        """自動找出 EXP 數字區。找不到就永久關閉戰績計（不影響打怪）。"""
+        try:
+            from src.vision import find_bars_pair, exp_text_roi_from_bars
+            raw = self._cap.grab()
+            if raw is None:
+                return False
+            hp, mp = find_bars_pair(raw)
+            roi = exp_text_roi_from_bars(raw, hp, mp) if hp else None
+        except Exception as e:
+            print(f"  （戰績計初始化失敗：{e} → 關閉，不影響打怪）")
+            self._meter_off = True
+            return False
+        if not roi:
+            return False
+        self._meter_roi = tuple(int(v) for v in roi)
+        print(f"  ✓ 戰績計啟用：EXP 區 {self._meter_roi}，每 "
+              f"{self.METER_REPORT_EVERY:.0f} 秒回報一次")
+        return True
+
+    def _meter_tick(self, now):
+        """節流地看 EXP 數字區有沒有變；變了就記一次進帳。
+
+        這是「打到怪的頻率」代理指標，不是真實經驗值（那要 OCR）。用途是讓
+        你能拿數字比較設定 A 和 B，而不是靠感覺調參。
+
+        全程包在 try 裡：量測只是附加價值，它壞掉絕不能害主迴圈停止打怪。
+        """
+        if self._meter_off or now < self._meter_next:
+            return
+        try:
+            self._meter_tick_inner(now)
+        except Exception as e:
+            self._meter_off = True
+            print(f"  （戰績計出錯：{e} → 關閉，打怪照常）")
+
+    def _meter_tick_inner(self, now):
+        self._meter_next = now + self.METER_EVERY
+        if not self._init_smart():
+            self._meter_off = True
+            return
+        if self._meter_roi is None:
+            if not self._meter_locate():
+                self._meter_next = now + 5.0      # 還沒校準好，等一下再試
+                return
+            self._meter_t0 = now
+            self._meter_report = now + self.METER_REPORT_EVERY
+        try:
+            from src.vision import region_changed
+            raw = self._cap.grab()
+            if raw is None:
+                return
+            x, y, w, h = self._meter_roi
+            crop = raw[y:y + h, x:x + w].astype(self._np.int16)
+            changed, self._meter_prev = region_changed(self._meter_prev, crop)
+        except Exception:
+            return
+        if changed:
+            self._meter_events.append(now)
+            if len(self._meter_events) > 4000:
+                del self._meter_events[:2000]
+        if now >= self._meter_report:
+            self._meter_report = now + self.METER_REPORT_EVERY
+            self._meter_print(now)
+
+    def _meter_print(self, now):
+        from src.vision import exp_per_hour
+        rate = exp_per_hour(self._meter_events, now)
+        mins = (now - self._meter_t0) / 60.0 if self._meter_t0 else 0.0
+        if rate <= 0:
+            print(f"  📊 戰績：跑了 {mins:.0f} 分、走了 {self._meter_steps} 步，"
+                  f"進帳次數還不夠估算（要滿 1 分鐘且有 2 次以上）")
+        else:
+            print(f"  📊 戰績：跑了 {mins:.0f} 分、走了 {self._meter_steps} 步，"
+                  f"進帳約 {rate:.0f} 次/小時（近 15 分鐘）")
+
     SWEEP_RETRY_EVERY = 8.0     # 盲走時每隔幾秒重試一次 edge-guard
     DWELL_CHECK_EVERY = 1.6     # 每隔幾秒量一次動靜（量一次要 0.15s，不能每步都量）
     DWELL_QUIET = 400           # 兩邊動靜總和低於此＝附近沒怪
@@ -979,6 +1068,7 @@ class HoldWiggle:
         self.attack_facing = direction
         self._sweep_pos += self._sweep_dir
         self._since_turn += 1
+        self._meter_steps += 1
         if self._sweep_pos >= limit:
             self._sweep_dir = -1
             self._since_turn = 0
@@ -1252,6 +1342,8 @@ class HoldWiggle:
                         self._smart_next = time.time() + random.uniform(8.0, 14.0)
 
                     now = time.time()
+                    if self.meter:
+                        self._meter_tick(now)
                     if self.sweep:
                         # 掃蕩：定時走一步，步與步之間持續攻擊
                         if self.adaptive_sweep:
@@ -1386,6 +1478,8 @@ def parse_args(argv=None):
     p.add_argument("--adaptive-sweep", action="store_true",
                    help="掃蕩時看哪邊有動靜：眼前有怪就多留一會兒打完，沒怪就快走去找，"
                         "怪在身後則提前折返（只改節奏，不會原地自己翻面）")
+    p.add_argument("--meter", action="store_true",
+                   help="戰績計：每分鐘回報「進帳次數/小時」，用數字比較不同設定的效果")
     p.add_argument("--start-paused", action="store_true",
                    help="啟動先待命，按 Ctrl 才開始（站好位置再啟動）")
     p.add_argument("--shuffle", action="store_true",
@@ -1425,7 +1519,7 @@ def main(argv=None):
                     sweep=args.sweep, sweep_steps=args.sweep_steps,
                     step_interval=args.step_interval,
                     start_paused=args.start_paused,
-                    adaptive_sweep=args.adaptive_sweep,
+                    adaptive_sweep=args.adaptive_sweep, meter=args.meter,
                     tuning_path=(args.tuning if os.path.isabs(args.tuning)
                                  else os.path.join(ROOT, args.tuning)),
                     dry_run=args.dry_run)

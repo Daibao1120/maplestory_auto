@@ -154,3 +154,49 @@ def test_adaptive_off_by_default():
     hw = sweeper()
     assert hw.adaptive_sweep is False
     assert hw._dwell == 1.0            # 不開就是原本的固定節奏
+
+
+# ---- 戰績計：用數字比較設定，而不是靠感覺 ----
+
+def test_meter_off_by_default_and_in_dry_run():
+    assert sweeper().meter is False
+    assert sweeper(meter=True).meter is False      # dry-run 不量測
+
+
+def test_meter_records_a_hit_when_exp_region_changes():
+    import numpy as np
+    hw = sweeper(meter=True)
+    hw.meter = True
+    hw._np = np
+    hw._init_smart = lambda: True
+    hw._meter_roi = (0, 0, 4, 4)
+    frames = [np.zeros((8, 8, 3), np.uint8), np.full((8, 8, 3), 200, np.uint8)]
+    hw._cap = type("C", (), {"grab": lambda self: frames.pop(0)})()
+    hw._meter_t0, hw._meter_report = 0.0, 1e9
+    hw._meter_tick(10.0)                            # 建立基準
+    hw._meter_tick(20.0)                            # 數字變了
+    assert len(hw._meter_events) == 1
+
+
+def test_meter_tick_is_throttled():
+    hw = sweeper(meter=True)
+    hw.meter = True
+    hw._meter_off = False
+    calls = []
+    hw._init_smart = lambda: calls.append(1) or True
+    hw._meter_roi = None
+    hw._meter_locate = lambda: False
+    hw._meter_tick(10.0)
+    hw._meter_tick(10.1)                            # 還在節流窗內
+    assert len(calls) == 1
+
+
+def test_meter_failure_never_stops_farming():
+    """量測是附加價值；它壞掉不可以害你停止打怪。"""
+    hw = sweeper(meter=True)
+    hw.meter = True
+    hw._init_smart = lambda: (_ for _ in ()).throw(RuntimeError("no mss"))
+    try:
+        hw._meter_tick(10.0)
+    except Exception:
+        raise AssertionError("戰績計的例外不該傳出去打斷主迴圈")
