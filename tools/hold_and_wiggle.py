@@ -1139,6 +1139,12 @@ class HoldWiggle:
         else:
             move_desc = "不移動" if not self.enable_move else \
                 f"每 {self.interval_min:.0f}~{self.interval_max:.0f} 秒巡邏挪一步（範圍 ±{self.patrol_steps} 步，{swap_desc}）"
+        if self.sweep:
+            # 掃蕩模式走的是完全不同的路徑，印舊巡邏的說明會讓人以為它沒在掃
+            move_desc = (f"左右掃蕩：每 {self.step_interval:.2f}s 走一步、"
+                         f"單邊 {self.sweep_steps} 步折返，攻擊朝走的方向")
+            if self.adaptive_sweep:
+                move_desc += "；有怪就留下打完、沒怪就快走、怪在身後提前折返"
         atk_desc = (f"按住「{self.attack_key}」攻擊（每 2~4 秒補壓防斷）" if self.hold_attack
                     else f"連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）")
         print("=" * 56)
@@ -1157,7 +1163,9 @@ class HoldWiggle:
         # 開場不強制轉向——沿用你啟動時角色本來面對的方向。attack_facing 只是假設值，
         # 你手動換邊（暫停→轉向→Ctrl 恢復）後會自動更新成你最後面對的方向。
         _f = '左' if self.attack_facing == 'left' else '右'
-        if self.enable_move:
+        if self.sweep:
+            print(f"  開始掃蕩（假設朝{_f}，手動換邊會跟著更新）")
+        elif self.enable_move:
             print(f"  開始攻擊（假設朝{_f}，手動換邊會跟著更新）；下次移動：{wait:.0f} 秒後")
         else:
             print(f"  開始攻擊（假設朝{_f}，手動換邊會跟著更新，不移動）")
@@ -1305,7 +1313,8 @@ class HoldWiggle:
                         self._next_attack = 0.0
                         _f = '左' if self.attack_facing == 'left' else '右'
                         print(f"  ▶ 已恢復攻擊（朝{_f}）。" +
-                              (f"下次移動：{wait:.0f} 秒後" if self.enable_move else ""))
+                              ("掃蕩中" if self.sweep else
+                               (f"下次移動：{wait:.0f} 秒後" if self.enable_move else "")))
 
                 time.sleep(self.POLL)
         except KeyboardInterrupt:
