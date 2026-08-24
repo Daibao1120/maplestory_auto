@@ -62,3 +62,35 @@ def test_sweep_defaults_off():
 def test_start_paused_flag_is_stored():
     hw = sweeper(start_paused=True)
     assert hw.start_paused is True
+
+
+def test_sweep_shrinks_range_when_minimap_unreadable():
+    """要 edge-guard 但讀不到座標時，盲走計步不可信 → 範圍收斂，不可照原範圍走。"""
+    hw = sweeper(sweep_steps=8, edge_guard=True)
+    hw.dry_run = False                      # 走盲走分支
+    hw._edge_guard_wanted = True
+    hw._edge_center = None
+    hw._edge_guard_broken = True            # 讓重試立即放棄，不去抓畫面
+    hw.edge_guard = False
+    calls = []
+    hw._tap = lambda k, hold=None: calls.append(k)
+    for _ in range(40):
+        hw._sweep_step()
+        assert -4 <= hw._sweep_pos <= 4     # 收斂為 8 // 2
+    assert calls                            # 仍在走，只是範圍變小
+
+
+def test_sweep_turns_back_at_safe_bound():
+    """真實座標已到安全界 → 這一步必須反向，不能再往外踏。"""
+    hw = sweeper(sweep_steps=8, edge_guard=True)
+    hw.dry_run = False
+    hw._edge_guard_wanted = True
+    hw.edge_guard = True
+    hw._edge_center, hw._edge_lo, hw._edge_hi = 100, 60, 140
+    hw._player_x = lambda **kw: 141         # 已越過右界
+    hw._sweep_dir = 1                       # 本來要往右
+    moved = []
+    hw._tap = lambda k, hold=None: moved.append(k)
+    hw._sweep_step()
+    assert moved == ["left"]                # 折返，而不是繼續往右走出平台
+    assert hw.attack_facing == "left"

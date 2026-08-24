@@ -378,6 +378,8 @@ class HoldWiggle:
         self._sweep_pos = 0
         self._sweep_dir = 1                           # +1 右 / -1 左
         self._last_step = 0.0
+        self._sweep_retry_at = 0.0                    # 下次重試 edge-guard 的時間
+        self._sweep_blind_warned = False
         self.dispel_buff = dispel_buff              # True = 偵測「要點掉的 buff」（如速度激發）並右鍵移除
         self.dispel_interval = float(dispel_interval)
         # 防攻擊失效的關鍵是「真的換邊打」：挪步後朝新的一側持續輸出到下一次
@@ -889,6 +891,8 @@ class HoldWiggle:
         time.sleep(0.05)
         return _user32.GetForegroundWindow() == self._hwnd
 
+    SWEEP_RETRY_EVERY = 8.0     # 盲走時每隔幾秒重試一次 edge-guard
+
     def _sweep_step(self):
         """掃蕩走一步：走到 ±sweep_steps 折返；走完面向＝走的方向，接著的攻擊
         自然朝那一邊（看到怪就打得到）。
@@ -897,6 +901,21 @@ class HoldWiggle:
         就當場折返——盲走計步在斜坡/被擊退後會累積誤差，實測是掉平台主因。
         """
         direction = "right" if self._sweep_dir > 0 else "left"
+        limit = self.sweep_steps
+        if self._edge_guard_wanted and not self.dry_run and self._edge_center is None:
+            # 開機時小地圖沒讀到就永久盲走，正是以前掉平台的原因 → 定期重試。
+            # 重試會抓幾張畫面（~0.5s），所以節流，不能每 0.45s 一步都試。
+            now = time.time()
+            if now >= self._sweep_retry_at:
+                self._sweep_retry_at = now + self.SWEEP_RETRY_EVERY
+                self._try_enable_edge_guard(retries=2)
+            if self._edge_center is None:
+                # 還是沒有真實座標 → 盲走計步不可信，把來回範圍收到一半再走
+                limit = max(1, self.sweep_steps // 2)
+                if not self._sweep_blind_warned:
+                    self._sweep_blind_warned = True
+                    print(f"  ⚠ 小地圖讀不到 → 盲走模式，掃蕩範圍收斂為 ±{limit} 步"
+                          f"（原 ±{self.sweep_steps}）以免走出平台")
         if self.edge_guard and self._edge_center is not None and not self.dry_run:
             x = self._player_x(retries=1, gap=0.0)
             if x is not None:
@@ -911,9 +930,9 @@ class HoldWiggle:
         self._release_moves()
         self.attack_facing = direction
         self._sweep_pos += self._sweep_dir
-        if self._sweep_pos >= self.sweep_steps:
+        if self._sweep_pos >= limit:
             self._sweep_dir = -1
-        elif self._sweep_pos <= -self.sweep_steps:
+        elif self._sweep_pos <= -limit:
             self._sweep_dir = 1
 
     def _move(self):
@@ -1018,8 +1037,11 @@ class HoldWiggle:
     def run(self, window_keyword):
         hwnd = _find_window(window_keyword)
         if hwnd is None:
-            print(f"[錯誤] 找不到視窗標題含「{window_keyword}」的遊戲。請先開好遊戲。")
-            return 1
+            # dry-run 只印動作不送鍵，遊戲沒開也該能跑，方便離線驗證參數組合
+            if not self.dry_run:
+                print(f"[錯誤] 找不到視窗標題含「{window_keyword}」的遊戲。請先開好遊戲。")
+                return 1
+            print("  （dry-run：找不到遊戲視窗，仍以模擬模式繼續，不會送出任何按鍵）")
         self._hwnd = hwnd
         self._window_keyword = window_keyword
         # 實體按鍵鉤子：區分「你的手」和「我們注入的鍵」，你的操作永遠優先
