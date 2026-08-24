@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from tools.overnight import ClassProfile, NightWatchCore, Perception  # noqa: E402
+from tools.overnight import build_core, ClassProfile, NightWatchCore, Perception  # noqa: E402
 
 PREVIEW_W = 760          # 預覽圖寬度（等比縮放）
 
@@ -97,14 +97,10 @@ class Worker:
                 self.log(f"送鍵初始化失敗（改為只看）：{e}")
                 self.acting = False
 
-        surv = cfg.get("survival", {})
-        profile = ClassProfile.from_config(cfg.get("class_profile"))
-        self._core = NightWatchCore(
-            max_seconds=8 * 3600,
-            potion_key=cfg["keys"].get("hp_potion", "delete"),
-            heal_mode=surv.get("heal_mode", "external"),
-            last_resort_hp=float(surv.get("last_resort_hp", 0.20)),
-            profile=profile)
+        # 和守夜共用同一份接線。控制台在動作模式下會真的送鍵，用預設值拼出來的
+        # 核心會走下平台（descend_enabled 預設是開的），而守夜早就停用了那個行為。
+        self._core = build_core(cfg, max_seconds=8 * 3600)
+        profile = self._core.profile
         with self.lock:
             self.snap["profile"] = (f"{profile.name}／{profile.attack_mode}"
                                     f"／buff {len(profile.buffs)}"

@@ -104,6 +104,7 @@ def test_watcher_ignores_flicker():
 # ---------------- 核心反應 ----------------
 
 def Wd(now, **kw):
+    kw.setdefault("exp_ok", True)      # 這些測試模擬「EXP 偵測正常」的世界
     return WorldState(now=now, **kw)
 
 

@@ -179,9 +179,16 @@ def exp_text_roi_from_bars(frame, hp, mp, text_h_frac=0.013):
     底部三條 UI 等距排列（HP→MP→EXP），HP/MP 用顏色可靠偵測，EXP 條顏色
     會隨填充比例變動不好認——所以用間距外推，比猜顏色穩。
     """
-    if frame is None or not mp:
+    if frame is None or (not mp and not hp):
         return None
     h, w = frame.shape[:2]
+    if not mp:
+        # MP 條是靠藍色填充段找的，MP 見底時就找不到——但 EXP 區的位置不會因為
+        # MP 少了就跑掉。三條 UI 等距排列，用 HP 的幾何往右推兩格即可。
+        # 沒有這個後備時，MP 一低就等於整個進帳偵測失效（EXP ROI 退化成 1x1，
+        # 永遠讀不到變化），反而觸發「EXP 停滯」的假警報。
+        gap = max(2, int(w * 0.004))
+        mp = {"x": hp["x"] + hp["len"] + gap, "y": hp["y"], "len": hp["len"]}
     gap = 6
     if hp:
         gap = max(2, mp["x"] - (hp["x"] + hp["len"]))

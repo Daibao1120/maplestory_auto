@@ -10,6 +10,10 @@ from tools.overnight import NightWatchCore, WorldState  # noqa: E402
 
 
 def W(now, **kw):
+    # 預設「EXP 偵測正常運作」——這些測試模擬的是「看得到進帳與否」的世界。
+    # exp_ok=False 代表偵測本身故障，那是另一回事，見
+    # test_watchdog_bugs.test_stall_does_not_fire_when_exp_cannot_be_measured。
+    kw.setdefault("exp_ok", True)
     return WorldState(now=now, **kw)
 
 

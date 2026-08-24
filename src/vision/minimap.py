@@ -148,6 +148,10 @@ class MinimapLocator:
         # 會等比縮放 ROI，並把輸出座標除回校準尺度——設定檔裡所有小地圖座標
         # （巡邏邊界、平台範圍、max_jump…）因此與視窗解析度無關。
         self.reference_size = config.get("reference_size")
+        # 容差預設值是對著這個尺寸的參考小地圖訂的（config 的 minimap.roi）。
+        _r = config.get("roi") or [0, 0, 235, 190]
+        self.REF_ROI_W = max(1, int(_r[2]))
+        self.REF_ROI_H = max(1, int(_r[3]))
         self.player_lower = tuple(config.get("player_color_lower", [24, 180, 180]))
         self.player_upper = tuple(config.get("player_color_upper", [40, 255, 255]))
         self.other_lower = tuple(config.get("other_color_lower", [0, 0, 200]))
@@ -305,16 +309,25 @@ class MinimapLocator:
         s = hsv[:, :, 1].astype(np.int32)
         v = hsv[:, :, 2].astype(np.int32)
         terrain = (s >= s_min) & (v >= v_lo) & (v < v_hi)
-        # 容差必須跟著換算到實際影像尺度。這些預設值是在「校準尺度」下訂的：
-        # 小地圖被放大 sx 倍後，一道 1px 的繪圖縫也變成 sx px，容差不跟著放大
-        # 就會在每道縫中斷延伸，把平台切碎（實測平台寬 107 被截到進不了 FARM）。
-        # 注意這不是「放寬」容差——是讓它在當初校準的單位裡維持不變。
+        # 容差改用「小地圖實際寬度的比例」表示，而不是絕對像素。
+        #
+        # 用 sx 換算是不夠的：Perception 校準成功後會把 roi 設成實測面板範圍並把
+        # reference_size 設為 None，於是 sx 恆為 1——也就是說「跟著 sx 縮放」在
+        # 真正跑守夜的那條路徑上完全沒有作用，而那正是平台被切碎的地方
+        #（實測同一張 2736 寬的畫面：校準路徑量到 205，守夜路徑只量到 98）。
+        #
+        # 這些預設值是對著 235px 寬的參考小地圖訂的。換成比例後，不管走哪條
+        # 路徑、面板實際多大，容差都會落在同一個相對尺度上。
+        rw, rh = region.shape[1], region.shape[0]
+        ref_w, ref_h = self.REF_ROI_W, self.REF_ROI_H
+        def _scale(v, actual, ref):
+            return max(1, int(round(v * max(1.0, float(actual) / ref))))
         hit = find_platform_run(
             terrain, px, py,
-            gap_tol=max(gap_tol, int(round(gap_tol * sx))),
-            min_run=max(min_run, int(round(min_run * sx))),
-            dy_max=max(dy_max, int(round(dy_max * sy))),
-            seed_r=max(seed_r, int(round(seed_r * sx))))
+            gap_tol=_scale(gap_tol, rw, ref_w),
+            min_run=_scale(min_run, rw, ref_w),
+            dy_max=_scale(dy_max, rh, ref_h),
+            seed_r=_scale(seed_r, rw, ref_w))
         if hit is None:
             return None
         yy, lx, rx = hit

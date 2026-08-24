@@ -200,3 +200,34 @@ def test_meter_failure_never_stops_farming():
         hw._meter_tick(10.0)
     except Exception:
         raise AssertionError("戰績計的例外不該傳出去打斷主迴圈")
+
+
+def test_early_turnaround_does_not_move_the_sweep_origin():
+    """提前折返只能翻方向，不能把「離出發點幾步」的計數歸零。
+
+    歸零等於把原點移到現在的位置，± 範圍就跟著漂走。小地圖讀不到而改用
+    盲走時，收斂範圍那道保險會因此完全失效——一路漂出平台。
+    """
+    hw = adaptive((3000, 100), sweep_steps=4)
+    hw._sweep_dir = 1
+    hw._sweep_pos = 3                  # 已離出發點 3 步
+    hw._since_turn = 5
+    hw._sweep_sense()
+    assert hw._sweep_dir == -1         # 有折返
+    assert hw._sweep_pos == 3, "折返時把步數計數歸零了 → 邊界原點會漂走"
+
+
+def test_blind_sweep_stays_bounded_even_with_early_turnarounds():
+    """盲走 + 反覆提前折返的組合下，位置仍必須被關在收斂範圍內。"""
+    hw = adaptive((3000, 100), sweep_steps=8, edge_guard=True)
+    hw.dry_run = False
+    hw._edge_guard_wanted = True
+    hw._edge_center = None
+    hw._edge_guard_broken = True
+    hw.edge_guard = False
+    hw._tap = lambda k, hold=None: None
+    for i in range(120):
+        hw._dwell_next = 0.0           # 每步都重新判斷（最容易漂的情況）
+        hw._sweep_sense()
+        hw._sweep_step()
+        assert -4 <= hw._sweep_pos <= 4, f"第 {i} 步漂出收斂範圍：{hw._sweep_pos}"

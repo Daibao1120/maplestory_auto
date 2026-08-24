@@ -16,6 +16,12 @@ ROOT = r"E:\maplestory_auto-main"
 PY = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
 SRC = os.path.join(ROOT, "tools", "overnight.py")
 
+# 安全相關的測試檔全部納入。原本只跑 test_overnight.py，於是後來新增在
+# 其他檔案裡的安全測試完全不被驗證——蓄意破壞照樣「通過」。
+SAFETY_TESTS = [os.path.join(ROOT, "tests", f) for f in (
+    "test_overnight.py", "test_watchdog_bugs.py", "test_modal.py",
+    "test_daemon_wiring.py")]
+
 MUTATIONS = [
     ("移除環境異常時的放開攻擊鍵",
      "        if not w.window or not w.frame_ok or not w.fg:\n            self._release_attack(acts)\n            return acts",
@@ -42,9 +48,21 @@ MUTATIONS = [
     ("IDLE_SILENT 不再靜默（允許動作）",
      '        if self.state == "IDLE_SILENT":\n            self._release_attack(acts)',
      '        if False:\n            self._release_attack(acts)'),
-    ("FARM 重入不重置 EXP 時戳",
-     '            self._last_exp_ts = None          # 重入不吃舊時間戳（防假性停滯）',
-     '            pass'),
+    ("FARM 重入不重置 EXP 停滯時鐘",
+     "            self._last_exp_real = None",
+     "            pass"),
+    ("停滯時鐘在不能打怪的期間照走（假停滯）",
+     "            self._last_exp_real += dt",
+     "            pass"),
+    ("EXP 量不到時仍判定停滯",
+     "        elif not w.exp_ok:",
+     "        elif False:"),
+    ("彈窗偵測沒接線也允許從停滯恢復",
+     'elif self._silent_reason == "exp_stall" and w.modal_ok and not w.modal:',
+     'elif self._silent_reason == "exp_stall":'),
+    ("關閉下降後仍會走下平台",
+     "        if not self.descend_enabled:",
+     "        if False:"),
     ("下降預算不重置",
      "            self._descend_count = 0           # 每回合獨立步數預算",
      "            pass"),
@@ -74,7 +92,7 @@ try:
             print(f"[跳過] 找不到片段：{name}")
             continue
         open(SRC, "w", encoding="utf-8").write(orig.replace(old, new, 1))
-        r = subprocess.run([PY, "-m", "pytest", "-q", os.path.join(ROOT, "tests", "test_overnight.py")],
+        r = subprocess.run([PY, "-m", "pytest", "-q"] + SAFETY_TESTS,
                            capture_output=True, text=True, cwd=ROOT,
                            encoding="utf-8", errors="replace")
         ok = r.returncode != 0

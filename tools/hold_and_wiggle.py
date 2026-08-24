@@ -1021,8 +1021,11 @@ class HoldWiggle:
             return
         if (behind > ahead * self.DWELL_BEHIND_RATIO
                 and self._since_turn >= self.DWELL_MIN_STEPS):
+            # 只翻方向，不動 _sweep_pos。_sweep_pos 是「離出發點幾步」的絕對
+            # 計數，± limit 的邊界是相對出發點量的；把它歸零等於把原點移到
+            # 現在的位置，邊界就跟著漂走——小地圖讀不到而改用盲走時，這會讓
+            # 收斂範圍那道保險完全失效。
             self._sweep_dir *= -1                   # 怪在身後：提前折返，別空走完整趟
-            self._sweep_pos = 0
             self._since_turn = 0
             self._dwell = self.DWELL_SLOW
             print(f"  ⇦ 怪在身後（前{ahead}/後{behind}）→ 提前折返")

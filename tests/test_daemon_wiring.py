@@ -69,3 +69,45 @@ def test_daemon_logs_when_it_loses_foreground():
     """失去前景會靜默停擺。半夜一個通知彈窗就報銷整夜，且 log 一片空白。"""
     src = daemon_src()
     assert "fg_lost" in src and "視窗失去前景" in src
+
+
+# ---- 三個工具必須建出設定相同的核心 ----
+
+CFG = {
+    "keys": {"hp_potion": "delete"},
+    "survival": {"heal_mode": "external", "last_resort_hp": 0.2},
+    "vision": {"others": {"on_others": "idle"}},
+    "combat": {"descend_enabled": False,
+               "patrol": {"enabled": True, "min_seconds": 11,
+                          "max_seconds": 22, "step_seconds": 0.5}},
+    "class_profile": {"name": "archer", "attack": {"mode": "hold", "key": "ctrl"}},
+}
+
+
+def test_build_core_applies_every_setting():
+    c = ov.build_core(CFG)
+    assert c.descend_enabled is False
+    assert c.patrol_enabled is True
+    assert c.patrol_every == (11.0, 22.0)
+    assert c.patrol_step == 0.5
+    assert c.on_others == "idle"
+    assert c.heal_mode == "external"
+
+
+def test_all_three_tools_build_the_core_the_same_way():
+    """selftest 檢查的、控制台跑的、守夜實跑的，必須是同一種核心。
+
+    這三處原本各拼一份，只有守夜是完整的：selftest 的整備度報告因此在講
+    實跑用不到的門檻，而控制台在動作模式下會走下平台。
+    """
+    import inspect
+    import tools.control_panel as cp
+    import tools.selftest as st
+    assert "build_core(" in inspect.getsource(ov.run_daemon)
+    for mod, name in ((cp, "control_panel"), (st, "selftest")):
+        src = inspect.getsource(mod)
+        assert "build_core(" in src, f"{name} 沒用共用接線"
+        # 只有 build_core 可以直接呼叫建構式；其他地方一律走它，
+        # 否則接線又會各自漂走。
+        assert "NightWatchCore(" not in src, (
+            f"{name} 又自己拼了一個核心 → 設定會和實跑不一致")

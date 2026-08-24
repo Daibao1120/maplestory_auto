@@ -66,6 +66,9 @@ class WorldState:
     # 「偵測根本沒接上」，安全含意天差地遠，必須分開。沒有這個旗標時
     # 一律當作「不知道」，也就是最保守的那一側。
     modal_ok: bool = False
+    # EXP 進帳偵測這一幀是否真的可用。EXP 區定位失敗時 exp_changed 恆為 False，
+    # 那和「真的沒打到怪」看起來一模一樣——停滯 watchdog 會因此發假警報。
+    exp_ok: bool = False
     # 同層附近的其他玩家人數（搶怪/被檢舉風險）
     others_near: int = 0
 
@@ -242,6 +245,7 @@ class NightWatchCore:
         self._last_exp_real: Optional[float] = None
         self._stall_retries = 0
         self._stall_since: Optional[float] = None
+        self._prev_now: Optional[float] = None
         self._idle_entered = 0.0
         self._idle_hp0: Optional[float] = None
         self._clean_since: Optional[float] = None
@@ -265,12 +269,28 @@ class NightWatchCore:
         self._last_mp_potion = 0.0
         self._next_pickup = 0.0
 
+    def _freeze_stall(self, dt):
+        """在「不可能打到怪」的期間把停滯時鐘往前推，等於不計入停滯時間。
+
+        tick() 會在讓手、失去前景、畫面不可用（斷線/選頻/登入畫面）時提早
+        return，但牆上時間照走。不凍結的話，一次長時間 alt-tab 回來的第一幀
+        就會被判成「480 秒沒進帳」——三次這種良性中斷就把整夜靜音掉。
+        HP 的中止判定早就有同樣的凍結處理，這裡補齊。
+        """
+        if self._last_exp_real is not None:
+            self._last_exp_real += dt
+        if self._last_exp_ts is not None:
+            self._last_exp_ts += dt
+
     # ---- 主入口 ----
     def tick(self, w: WorldState) -> List[Action]:
         acts: List[Action] = []
         if self._t0 is None:
             self._t0 = w.now
             self._next_repos = w.now + self.rng.uniform(*self.REPOS_EVERY)
+        # 這一圈距離上一圈多久。用來在「根本不可能打到怪」的期間凍結停滯時鐘。
+        dt = 0.0 if self._prev_now is None else max(0.0, w.now - self._prev_now)
+        self._prev_now = w.now
 
         if self.state == "STOPPED":
             return acts
@@ -287,13 +307,16 @@ class NightWatchCore:
                 self.stats.yields += 1
                 acts.append(Action("log", "使用者操作 → 讓手"))
             self._yield_until = w.now + self.YIELD_SECONDS
+            self._freeze_stall(dt)
             return acts
         self._touch_active = False
         if w.now < self._yield_until:
+            self._freeze_stall(dt)
             return acts
 
         # 環境安全：任一異常 → 放開攻擊鍵、不送任何鍵
         if not w.window or not w.frame_ok or not w.fg:
+            self._freeze_stall(dt)
             self._release_attack(acts)
             return acts
 
@@ -581,6 +604,10 @@ class NightWatchCore:
             self._last_exp_ts = w.now
             self._last_exp_real = w.now
             self._stall_retries = 0        # 有進帳＝真的在打 → 重試額度歸零
+        elif not w.exp_ok:
+            # 量不到 EXP 就沒有資格判斷「停滯」——那只會把偵測故障誤報成
+            # 打不到怪，然後靜默整夜。時鐘跟著往前推，等於不計入停滯時間。
+            self._last_exp_real = w.now
         elif w.now - self._last_exp_real > self.EXP_STALL_LIMIT:
             self._release_attack(acts)
             self._silent_reason = "exp_stall"
@@ -859,6 +886,7 @@ class Perception:
         self.calib_note = ""
         self.in_game = True          # 有 HP 條＝真的在遊戲畫面內
         self._mp_missing_logged = False
+        self._last_raw = None        # find_buff 用：buff 模板只認原始尺度
         self._not_in_game = 0
         self._pos_miss = 0          # 連續讀不到玩家點的次數 → 觸發重新校準
         self._recalib_at = 0.0
@@ -965,6 +993,7 @@ class Perception:
         except Exception:
             raw = None
         frame = raw
+        self._last_raw = raw
         if raw is not None:
             self.raw_size = (raw.shape[1], raw.shape[0])
             # 世界（怪物模板）用正規化畫面；UI（血條/小地圖）用原始畫面——
@@ -1023,6 +1052,10 @@ class Perception:
             w.others_near = self.mm.others_near(raw, pos, self.others_dy,
                                                 self.others_dx)
             info["others_near"] = w.others_near
+        # EXP 區定位失敗時，原本退化成 1x1 的 ROI —— 它永遠不會變，於是
+        # exp_changed 恆為 False，和「真的沒打到怪」無法區分，停滯 watchdog
+        # 會據此靜默整夜。改成明確告訴核心「這一幀量不到 EXP」。
+        w.exp_ok = self.exp_roi_auto is not None
         er = self.exp_roi_auto or (0, 0, 1, 1)
         el, et, ew, eh = (int(x) for x in er)
         crop = raw[et:et + eh, el:el + ew].astype(np.int16)
@@ -1077,8 +1110,16 @@ class Perception:
             info["mon_hint"] = w.mon_hint
         return w, frame, info
 
-    def find_buff(self, frame):
+    def find_buff(self, frame=None):
+        """在**原始**畫面上找要點掉的 buff，回傳螢幕座標。
+
+        不吃呼叫端傳進來的畫面：buff 模板是在原始解析度截的，餵正規化畫面
+        就永遠找不到（實測同一張圖，原始畫面分數 1.00、正規化畫面 0 個結果），
+        而且回傳座標還會加上原始視窗原點 → 右鍵點到一千多像素之外。
+        傳錯尺度的機會直接拿掉，比記得傳對可靠。
+        """
         from src.vision.monster import MonsterDetector
+        frame = self._last_raw
         if frame is None:
             return None
         try:
@@ -1110,6 +1151,46 @@ class Perception:
 # ============================================================
 #  執行殼：感知 → core.tick → 送鍵（薄層，安全規則全在核心）
 # ============================================================
+
+def build_core(cfg, max_seconds=7.5 * 3600, log=None):
+    """依設定檔建出**完整接線**的 NightWatchCore。
+
+    這段原本在 run_daemon、control_panel、selftest 裡各寫一份，而只有 daemon
+    那份是完整的。後果：selftest 的整備度報告講的是實跑用不到的門檻，
+    而控制台在動作模式下會走下平台（daemon 早就停用了那個行為）。
+    檢查用的東西和實跑的東西必須是同一個，否則「檢查通過」毫無意義。
+    """
+    surv = cfg.get("survival", {}) or {}
+    combat = cfg.get("combat", {}) or {}
+    profile = ClassProfile.from_config(cfg.get("class_profile"))
+    core = NightWatchCore(
+        max_seconds=max_seconds,
+        profile=profile,
+        potion_key=(cfg.get("keys", {}) or {}).get("hp_potion", "delete"),
+        heal_mode=surv.get("heal_mode", "self"),
+        last_resort_hp=float(surv.get("last_resort_hp", 0.20)))
+    core.on_others = ((cfg.get("vision", {}) or {}).get("others") or {}).get(
+        "on_others", "log")
+    core.descend_enabled = bool(combat.get("descend_enabled", True))
+    pt = combat.get("patrol") or {}
+    core.patrol_enabled = bool(pt.get("enabled", False))
+    core.patrol_every = (float(pt.get("min_seconds", 25)),
+                         float(pt.get("max_seconds", 40)))
+    core.patrol_step = float(pt.get("step_seconds", 0.35))
+    if log:
+        log(f"職業設定：{profile.name}｜攻擊 {profile.attack_mode}"
+            f"｜buff {len(profile.buffs)} 顆｜MP {'有' if profile.mp_key else '無'}")
+        if not core.descend_enabled:
+            log("下降：關閉（單平台模式——絕不主動走下平台）")
+        if core.patrol_enabled:
+            log(f"平台內巡邏：開啟（每 {core.patrol_every[0]:.0f}~"
+                f"{core.patrol_every[1]:.0f} 秒一步，僅在寬度 >= "
+                f"{core.PATROL_MIN_WIDTH:.0f} 的平台）")
+        log(f"補血模式：{core.heal_mode}"
+            + ("（寵物/使用者負責，核心不碰藥水鍵）"
+               if core.heal_mode == "external" else ""))
+    return core
+
 
 def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
     import ctypes
@@ -1207,32 +1288,7 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
         elif a.verb == "log":
             log(str(a.arg))
 
-    heal_mode = cfg.get("survival", {}).get("heal_mode", "self")
-    profile = ClassProfile.from_config(cfg.get("class_profile"))
-    core_on_others = (cfg.get("vision", {}).get("others") or {}).get("on_others", "log")
-    log(f"職業設定：{profile.name}｜攻擊 {profile.attack_mode}"
-        f"｜buff {len(profile.buffs)} 顆｜MP {'有' if profile.mp_key else '無'}")
-    core = NightWatchCore(max_seconds=max_seconds, profile=profile,
-                          potion_key=cfg["keys"].get("hp_potion", "delete"),
-                          heal_mode=heal_mode,
-                          last_resort_hp=float(cfg.get("survival", {})
-                                               .get("last_resort_hp", 0.20)))
-    core.on_others = core_on_others
-    pt = (cfg.get("combat", {}) or {}).get("patrol") or {}
-    core.descend_enabled = bool((cfg.get("combat", {}) or {})
-                                .get("descend_enabled", True))
-    if not core.descend_enabled:
-        log("下降：關閉（單平台模式——絕不主動走下平台）")
-    core.patrol_enabled = bool(pt.get("enabled", False))
-    core.patrol_every = (float(pt.get("min_seconds", 25)),
-                         float(pt.get("max_seconds", 40)))
-    core.patrol_step = float(pt.get("step_seconds", 0.35))
-    if core.patrol_enabled:
-        log(f"平台內巡邏：開啟（每 {core.patrol_every[0]:.0f}~"
-            f"{core.patrol_every[1]:.0f} 秒一步，僅在寬度 >= "
-            f"{core.PATROL_MIN_WIDTH:.0f} 的平台）")
-    log(f"補血模式：{heal_mode}"
-        + ("（寵物/使用者負責，核心不碰藥水鍵）" if heal_mode == "external" else ""))
+    core = build_core(cfg, max_seconds=max_seconds, log=log)
     fg_lost = [None]
     in_game_last = [True]
     log(f"守夜 v2 開始（上限 {max_seconds/3600:.1f}h）")

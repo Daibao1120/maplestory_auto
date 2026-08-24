@@ -36,15 +36,16 @@ def verdict(ok_ratio, good=0.9, warn=0.5):
 
 def run(seconds=45.0, cfg_path=None):
     import yaml
-    from tools.overnight import ClassProfile, NightWatchCore, Perception
+    from tools.overnight import build_core, ClassProfile, NightWatchCore, Perception
 
     cfg_path = cfg_path or os.path.join(ROOT, "config", "settings.yaml")
     with open(cfg_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     per = Perception(cfg, ROOT)
-    profile = ClassProfile.from_config(cfg.get("class_profile"))
-    core = NightWatchCore(heal_mode=cfg.get("survival", {}).get("heal_mode", "self"),
-                          profile=profile)
+    # 用和守夜完全相同的接線建核心。整備度報告的價值全在「檢查的東西＝實跑的
+    # 東西」；用預設值另外拼一個核心，報告講的就是實跑用不到的門檻。
+    core = build_core(cfg)
+    profile = core.profile
 
     n = 0
     ok = Counter()
@@ -121,14 +122,24 @@ def run(seconds=45.0, cfg_path=None):
     if widths:
         sw = sorted(widths)
         med = sw[len(sw) // 2]
-        passing = sum(1 for x in widths if x >= core.WIDE_ENOUGH) / len(widths)
+        # 實際擋在前面的門檻取決於設定：關掉下降時，寬度不會擋住開打，
+        # 擋住的是巡邏（PATROL_MIN_WIDTH）。報告必須講實跑真正在用的那個，
+        # 否則使用者會照著一個根本不生效的數字去調參。
+        if core.descend_enabled:
+            gate, gname = core.WIDE_ENOUGH, "開打門檻"
+        else:
+            gate, gname = core.PATROL_MIN_WIDTH, "巡邏門檻（下降已關閉，寬度不擋開打）"
+        passing = sum(1 for x in widths if x >= gate) / len(widths)
         v = "綠" if passing > 0.8 else ("黃" if passing > 0.3 else "紅")
         print(f"  [{v}] {'平台寬度':12s} 中位數 {med:.0f}"
               f"（{min(widths):.0f}~{max(widths):.0f}），"
-              f"{passing:.0%} 的圈數 >= 開打門檻 {core.WIDE_ENOUGH:.0f}")
+              f"{passing:.0%} 的圈數 >= {gname} {gate:.0f}")
         if passing <= 0.3:
-            print("       ← 量到的平台太窄，核心永遠不會進入 FARM。"
-                  "若你用調參 UI 量到的寬度明顯大於這個數字，就是量測被切碎了。")
+            print("       ← 量到的平台太窄。"
+                  + ("核心永遠不會進入 FARM。" if core.descend_enabled
+                     else "會開打但完全不巡邏（站著打）。")
+                  + "這個數字是小地圖面板的原始像素，")
+            print("         和調參 UI 的讀數不同尺度，兩者不能直接相比。")
         dl = sorted(d[0] for d in dists)[len(dists) // 2]
         dr = sorted(d[1] for d in dists)[len(dists) // 2]
         print(f"       距左緣 {dl:.0f} / 距右緣 {dr:.0f}（下降時會往較近的一側走）")

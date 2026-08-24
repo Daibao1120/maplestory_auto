@@ -14,6 +14,10 @@ from tools.overnight import NightWatchCore, WorldState  # noqa: E402
 
 
 def W(now, **kw):
+    # 預設「EXP 偵測正常運作」——這些測試模擬的是「看得到進帳與否」的世界。
+    # exp_ok=False 代表偵測本身故障，那是另一回事，見
+    # test_watchdog_bugs.test_stall_does_not_fire_when_exp_cannot_be_measured。
+    kw.setdefault("exp_ok", True)
     return WorldState(now=now, **kw)
 
 
@@ -144,3 +148,61 @@ def test_descend_enabled_still_descends():
     for t in range(2, 40):
         c.tick(W(float(t), hp=0.95, pos=(50, 76), span=SPAN(3, dl=2, dr=30)))
     assert c.stats.descents >= 1
+
+
+def test_stall_does_not_fire_when_exp_cannot_be_measured():
+    """EXP 區定位失敗時 exp_changed 恆為 False，和「真的沒打到怪」看起來一樣。
+
+    據此判定停滯，等於把偵測故障誤報成打不到怪然後靜默整夜。量不到就沒有
+    資格判斷停滯——該做的是把偵測修好並講出來，不是安靜停手。
+    """
+    c = farming()
+    t = 2.0
+    while t < 3000.0:
+        c.tick(W(t, hp=0.95, pos=(50, 90), span=SPAN(20), exp_ok=False))
+        t += 1.0
+    assert c.state == "FARM", "偵測故障被誤報成 EXP 停滯 → 白白靜默整夜"
+
+
+def test_exp_roi_survives_a_missing_mp_bar():
+    """MP 見底時找不到 MP 條，但 EXP 區的位置不會因此跑掉。
+
+    EXP 區原本完全由 MP 幾何推算，MP 一不見就回傳 None → ROI 退化成 1x1 →
+    進帳偵測全滅。in_game 已放寬成只認 HP 條，這裡必須跟上。
+    """
+    import numpy as np
+    from src.vision import exp_text_roi_from_bars
+    frame = np.zeros((900, 1400, 3), np.uint8)
+    hp = {"x": 300, "y": 860, "len": 200}
+    roi = exp_text_roi_from_bars(frame, hp, None)
+    assert roi is not None, "缺 MP 條就算不出 EXP 區 → 整夜讀不到進帳"
+    x, y, w, h = roi
+    assert x > hp["x"] + hp["len"], "EXP 區應該在 HP 條右側"
+    assert w > 0 and h > 0
+
+
+def test_a_long_alt_tab_does_not_count_as_an_exp_stall():
+    """失去前景期間根本不可能打到怪，那段時間不該計入停滯。
+
+    不凍結時鐘的話，一次長時間 alt-tab 回來的第一幀就被判成「480 秒沒進帳」，
+    三次這種良性中斷（切視窗、斷線重連、選頻畫面）就把整夜靜音掉。
+    """
+    c = farming()
+    c.tick(W(2.0, hp=0.95, pos=(50, 90), span=SPAN(20), exp_changed=True))
+    t = 3.0
+    while t < 700.0:                      # 失去前景近 12 分鐘
+        c.tick(W(t, hp=0.95, pos=(50, 90), span=SPAN(20), fg=False))
+        t += 1.0
+    c.tick(W(t, hp=0.95, pos=(50, 90), span=SPAN(20)))     # 回到前景
+    assert c.state != "IDLE_SILENT", "切個視窗回來就被誤判成停滯"
+
+
+def test_yielding_to_the_user_does_not_count_as_an_exp_stall():
+    c = farming()
+    c.tick(W(2.0, hp=0.95, pos=(50, 90), span=SPAN(20), exp_changed=True))
+    t = 3.0
+    while t < 700.0:
+        c.tick(W(t, hp=0.95, pos=(50, 90), span=SPAN(20), user_touch=True))
+        t += 1.0
+    c.tick(W(t + 30.0, hp=0.95, pos=(50, 90), span=SPAN(20)))
+    assert c.state != "IDLE_SILENT", "你自己玩了一陣子，回來卻被判成停滯"
