@@ -305,8 +305,16 @@ class MinimapLocator:
         s = hsv[:, :, 1].astype(np.int32)
         v = hsv[:, :, 2].astype(np.int32)
         terrain = (s >= s_min) & (v >= v_lo) & (v < v_hi)
-        hit = find_platform_run(terrain, px, py, gap_tol=gap_tol,
-                                min_run=min_run, dy_max=dy_max, seed_r=seed_r)
+        # 容差必須跟著換算到實際影像尺度。這些預設值是在「校準尺度」下訂的：
+        # 小地圖被放大 sx 倍後，一道 1px 的繪圖縫也變成 sx px，容差不跟著放大
+        # 就會在每道縫中斷延伸，把平台切碎（實測平台寬 107 被截到進不了 FARM）。
+        # 注意這不是「放寬」容差——是讓它在當初校準的單位裡維持不變。
+        hit = find_platform_run(
+            terrain, px, py,
+            gap_tol=max(gap_tol, int(round(gap_tol * sx))),
+            min_run=max(min_run, int(round(min_run * sx))),
+            dy_max=max(dy_max, int(round(dy_max * sy))),
+            seed_r=max(seed_r, int(round(seed_r * sx))))
         if hit is None:
             return None
         yy, lx, rx = hit

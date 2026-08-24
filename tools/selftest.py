@@ -50,6 +50,7 @@ def run(seconds=45.0, cfg_path=None):
     ok = Counter()
     acts = Counter()
     states = Counter()
+    widths, dists = [], []
     exp_events = 0
     logs = []            # 核心的狀態轉換理由——診斷「為什麼停手」的關鍵
     tick_ms = []
@@ -69,6 +70,10 @@ def run(seconds=45.0, cfg_path=None):
         ok["MP"] += w.mp is not None
         ok["小地圖玩家"] += w.pos is not None
         ok["腳下平台"] += w.span is not None
+        if w.span:
+            widths.append(float(w.span["width"]))
+            dists.append((float(w.span["dist_left"]),
+                          float(w.span["dist_right"])))
         ok["怪物模板"] += bool(info.get("monsters"))
         ok["活動偵測"] += bool((info.get("motion") or {}).get("ready"))
         ok["彈窗誤報"] += bool(info.get("modal"))
@@ -110,6 +115,25 @@ def run(seconds=45.0, cfg_path=None):
     fp = ok["彈窗誤報"] / n
     print(f"  [{'綠' if fp < 0.05 else '紅'}] {'彈窗偵測':12s} 誤報 {fp:5.0%}"
           f"{'' if fp < 0.05 else '  ← 誤把 UI 當彈窗，會一直停手'}")
+    # 平台寬度：核心要求 width >= WIDE_ENOUGH 才開打。這個門檻是寫死的常數，
+    # 而 width 的單位取決於小地圖面板實際多大（校準後就是原始像素）。
+    # 不把實測值印出來，「為什麼整夜都沒開打」根本無從判斷。
+    if widths:
+        sw = sorted(widths)
+        med = sw[len(sw) // 2]
+        passing = sum(1 for x in widths if x >= core.WIDE_ENOUGH) / len(widths)
+        v = "綠" if passing > 0.8 else ("黃" if passing > 0.3 else "紅")
+        print(f"  [{v}] {'平台寬度':12s} 中位數 {med:.0f}"
+              f"（{min(widths):.0f}~{max(widths):.0f}），"
+              f"{passing:.0%} 的圈數 >= 開打門檻 {core.WIDE_ENOUGH:.0f}")
+        if passing <= 0.3:
+            print("       ← 量到的平台太窄，核心永遠不會進入 FARM。"
+                  "若你用調參 UI 量到的寬度明顯大於這個數字，就是量測被切碎了。")
+        dl = sorted(d[0] for d in dists)[len(dists) // 2]
+        dr = sorted(d[1] for d in dists)[len(dists) // 2]
+        print(f"       距左緣 {dl:.0f} / 距右緣 {dr:.0f}（下降時會往較近的一側走）")
+    else:
+        print(f"  [紅] {'平台寬度':12s} 一圈都沒量到 → 核心不會開打")
     print(f"\n  EXP 進帳：{exp_events} 次"
           f"（{exp_events / max(dur, 1) * 3600:.0f} 次/小時）")
     print(f"  狀態分佈：{dict(states)}")
