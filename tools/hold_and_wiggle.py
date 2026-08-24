@@ -333,7 +333,7 @@ class HoldWiggle:
                  dispel_buff=False, dispel_interval=5.0,
                  alternate_face=True, swap_every=1,
                  smart_face=True, shuffle=False, sweep=False, sweep_steps=8,
-                 step_interval=0.45, start_paused=False,
+                 step_interval=0.45, start_paused=False, adaptive_sweep=False,
                  tuning_path=None, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
@@ -380,6 +380,10 @@ class HoldWiggle:
         self._last_step = 0.0
         self._sweep_retry_at = 0.0                    # 下次重試 edge-guard 的時間
         self._sweep_blind_warned = False
+        self.adaptive_sweep = adaptive_sweep and not dry_run
+        self._dwell = 1.0                             # 目前的停留倍率（快取）
+        self._dwell_next = 0.0                        # 下次量動靜的時間
+        self._since_turn = 0                          # 這個方向已走幾步（折返遲滯用）
         self.dispel_buff = dispel_buff              # True = 偵測「要點掉的 buff」（如速度激發）並右鍵移除
         self.dispel_interval = float(dispel_interval)
         # 防攻擊失效的關鍵是「真的換邊打」：挪步後朝新的一側持續輸出到下一次
@@ -892,6 +896,49 @@ class HoldWiggle:
         return _user32.GetForegroundWindow() == self._hwnd
 
     SWEEP_RETRY_EVERY = 8.0     # 盲走時每隔幾秒重試一次 edge-guard
+    DWELL_CHECK_EVERY = 1.6     # 每隔幾秒量一次動靜（量一次要 0.15s，不能每步都量）
+    DWELL_QUIET = 400           # 兩邊動靜總和低於此＝附近沒怪
+    DWELL_SLOW = 2.2            # 眼前有怪 → 這一步等這麼多倍（留下來打）
+    DWELL_FAST = 0.55           # 附近沒怪 → 縮短間隔，快點走去找
+    DWELL_BEHIND_RATIO = 2.0    # 身後動靜是眼前的幾倍才值得提前折返
+    DWELL_MIN_STEPS = 2         # 至少走幾步才准提前折返（避免原地來回抖）
+
+    def _sweep_sense(self):
+        """量左右動靜，更新「停留倍率」，必要時提前折返。
+
+        掃蕩原本是盲目來回：怪站在左邊時，右半趟完全是空揮。這裡用既有的
+        動靜偵測（怪會動、背景不會）做兩件事——眼前有怪就多留一會兒把牠打完，
+        附近沒怪就縮短間隔快點走過去找。這只改「節奏」，不會像 smart-face
+        那樣在原地自己翻面。
+        """
+        now = time.time()
+        if now < self._dwell_next:
+            return
+        self._dwell_next = now + self.DWELL_CHECK_EVERY
+        if not self._init_smart():
+            self.adaptive_sweep = False
+            return
+        try:
+            sides = self._motion_sides()
+        except Exception:
+            return
+        if sides is None:
+            return
+        left, right = sides
+        facing_left = self._sweep_dir < 0
+        ahead, behind = (left, right) if facing_left else (right, left)
+        if left + right < self.DWELL_QUIET:
+            self._dwell = self.DWELL_FAST          # 沒怪：快走
+            return
+        if (behind > ahead * self.DWELL_BEHIND_RATIO
+                and self._since_turn >= self.DWELL_MIN_STEPS):
+            self._sweep_dir *= -1                   # 怪在身後：提前折返，別空走完整趟
+            self._sweep_pos = 0
+            self._since_turn = 0
+            self._dwell = self.DWELL_SLOW
+            print(f"  ⇦ 怪在身後（前{ahead}/後{behind}）→ 提前折返")
+            return
+        self._dwell = self.DWELL_SLOW if ahead > behind else 1.0
 
     def _sweep_step(self):
         """掃蕩走一步：走到 ±sweep_steps 折返；走完面向＝走的方向，接著的攻擊
@@ -924,16 +971,20 @@ class HoldWiggle:
                         or (direction == "left" and x <= self._edge_lo)):
                     self._sweep_dir *= -1
                     self._sweep_pos = 0
+                    self._since_turn = 0
                     direction = "right" if self._sweep_dir > 0 else "left"
                     print(f"  ↩ 掃蕩到安全界（x={x}）→ 提前折返")
         self._tap(direction, hold=self.move_time + random.uniform(-0.02, 0.02))
         self._release_moves()
         self.attack_facing = direction
         self._sweep_pos += self._sweep_dir
+        self._since_turn += 1
         if self._sweep_pos >= limit:
             self._sweep_dir = -1
+            self._since_turn = 0
         elif self._sweep_pos <= -limit:
             self._sweep_dir = 1
+            self._since_turn = 0
 
     def _move(self):
         """有邊界的巡邏：往目前方向挪『一小步』，走到 ±patrol_steps 步就折返。
@@ -1195,7 +1246,10 @@ class HoldWiggle:
                     now = time.time()
                     if self.sweep:
                         # 掃蕩：定時走一步，步與步之間持續攻擊
-                        if now - self._last_step >= self.step_interval:
+                        if self.adaptive_sweep:
+                            self._sweep_sense()
+                            now = time.time()
+                        if now - self._last_step >= self.step_interval * self._dwell:
                             self._sweep_step()
                             self._last_step = now
                             self._next_attack = 0.0   # 走完立刻朝該方向打
@@ -1320,6 +1374,9 @@ def parse_args(argv=None):
                    help="掃蕩單邊走幾步折返（預設 8）；平台越寬設越大")
     p.add_argument("--step-interval", type=float, default=0.45,
                    help="掃蕩每隔幾秒走一步（預設 0.45）；步與步之間持續攻擊")
+    p.add_argument("--adaptive-sweep", action="store_true",
+                   help="掃蕩時看哪邊有動靜：眼前有怪就多留一會兒打完，沒怪就快走去找，"
+                        "怪在身後則提前折返（只改節奏，不會原地自己翻面）")
     p.add_argument("--start-paused", action="store_true",
                    help="啟動先待命，按 Ctrl 才開始（站好位置再啟動）")
     p.add_argument("--shuffle", action="store_true",
@@ -1359,6 +1416,7 @@ def main(argv=None):
                     sweep=args.sweep, sweep_steps=args.sweep_steps,
                     step_interval=args.step_interval,
                     start_paused=args.start_paused,
+                    adaptive_sweep=args.adaptive_sweep,
                     tuning_path=(args.tuning if os.path.isabs(args.tuning)
                                  else os.path.join(ROOT, args.tuning)),
                     dry_run=args.dry_run)

@@ -94,3 +94,63 @@ def test_sweep_turns_back_at_safe_bound():
     hw._sweep_step()
     assert moved == ["left"]                # 折返，而不是繼續往右走出平台
     assert hw.attack_facing == "left"
+
+
+# ---- 適應性掃蕩：眼前有怪就留下打，沒怪就快走，怪在身後就提前折返 ----
+
+def adaptive(sides, **kw):
+    """做一台開了適應性掃蕩、動靜量被寫死成 `sides` 的掃蕩器。"""
+    hw = sweeper(**kw)
+    hw.adaptive_sweep = True
+    hw._init_smart = lambda: True
+    hw._motion_sides = lambda: sides
+    hw._dwell_next = 0.0
+    return hw
+
+
+def test_dwell_slows_down_when_monsters_are_ahead():
+    hw = adaptive((100, 3000))        # 動靜集中在右邊
+    hw._sweep_dir = 1                 # 正往右走 → 怪在眼前
+    hw._sweep_sense()
+    assert hw._dwell == hw.DWELL_SLOW  # 留下來打，不要走掉
+    assert hw._sweep_dir == 1          # 方向不變
+
+
+def test_dwell_speeds_up_when_nothing_is_moving():
+    hw = adaptive((10, 10))           # 兩邊都靜悄悄＝怪清光了
+    hw._sweep_sense()
+    assert hw._dwell == hw.DWELL_FAST  # 快點走去找下一隻
+
+
+def test_turns_back_early_when_monsters_are_behind():
+    hw = adaptive((3000, 100))        # 動靜在左
+    hw._sweep_dir = 1                 # 卻正往右走 → 整趟是空揮
+    hw._since_turn = 5
+    hw._sweep_sense()
+    assert hw._sweep_dir == -1         # 提前折返回去打
+    assert hw._since_turn == 0
+
+
+def test_does_not_flip_before_minimum_steps():
+    """剛折返就又想折返 → 會原地抖。要求走滿幾步才准再翻。"""
+    hw = adaptive((3000, 100))
+    hw._sweep_dir = 1
+    hw._since_turn = 0                # 才剛轉過來
+    hw._sweep_sense()
+    assert hw._sweep_dir == 1          # 不准馬上再翻
+
+
+def test_motion_check_is_throttled():
+    """量動靜要抓兩張畫面（~0.15s）。每步都量會吃掉三分之一的時間。"""
+    calls = []
+    hw = adaptive((10, 10))
+    hw._motion_sides = lambda: (calls.append(1), (10, 10))[1]
+    hw._sweep_sense()
+    hw._sweep_sense()                  # 立刻再問一次 → 應該吃快取
+    assert len(calls) == 1
+
+
+def test_adaptive_off_by_default():
+    hw = sweeper()
+    assert hw.adaptive_sweep is False
+    assert hw._dwell == 1.0            # 不開就是原本的固定節奏

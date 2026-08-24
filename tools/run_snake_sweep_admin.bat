@@ -59,10 +59,16 @@ REM                           on slopes -- that drift is what walks you off the 
 REM   --edge-margin 40        safe range = start x +/- this many minimap pixels.
 REM                           Your measured platform is ~107 wide, so 40 keeps a
 REM                           healthy buffer. SMALLER for a narrower platform.
+REM   --adaptive-sweep        watches which side has movement (monsters move, the
+REM                           background does not): lingers to finish off what is
+REM                           in front, walks faster when the area is cleared, and
+REM                           turns back early when the monsters are behind you.
+REM                           Only changes TIMING -- it never flips your facing
+REM                           while standing still.
 REM   --dispel-buff           right-clicks away speed boosts (they make every step
 REM                           overshoot and walk you off the platform)
 REM   --no-refocus            pauses (does not steal focus) when you click away
-%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.10 --sweep --sweep-steps 10 --step-interval 0.45 --move-time 0.25 --start-paused --edge-guard --edge-margin 40 --dispel-buff --no-refocus
+%PYCMD% tools\hold_and_wiggle.py --key ctrl --attack-interval 0.10 --sweep --sweep-steps 10 --step-interval 0.45 --move-time 0.25 --start-paused --edge-guard --edge-margin 40 --adaptive-sweep --dispel-buff --no-refocus
 
 echo.
 echo Finished. Press any key to close.
