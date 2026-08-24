@@ -113,3 +113,34 @@ def test_stall_does_not_recover_while_a_popup_is_actually_visible():
                  modal_ok=True, modal=(10, 10, 200, 200)))
         t += 1.0
     assert c.state == "IDLE_SILENT"
+
+
+# ---- 單平台模式：絕不主動走下平台 ----
+
+def test_descend_disabled_never_steps_off_the_platform():
+    """關閉下降後，即使量到的寬度低於開打門檻，也不可以走出任何一步。
+
+    寬度量測被繪圖縫切碎時，核心會以為自己站在窄崖上而主動走下去——
+    使用者只在一個寬平台掛機，那一步永遠是錯的。
+    """
+    c = NightWatchCore(potion_key="delete")
+    c.descend_enabled = False
+    c.tick(W(0.0, hp=0.90, pos=(50, 76), span=SPAN(3)))
+    c.tick(W(1.0, hp=0.95, pos=(50, 76), span=SPAN(3)))
+    for t in range(2, 60):
+        c.tick(W(float(t), hp=0.95, pos=(50, 76), span=SPAN(3, dl=2, dr=30)))
+    assert c.stats.descents == 0, "關了下降卻還是往邊緣走了下去"
+    assert c.state == "FARM", "應該就地開打，而不是卡在下降或發呆"
+    # 平台警衛的推回步是反方向的安全行為，不在禁止之列——它把角色從邊緣
+    # 推向中央。這裡要禁的是「主動朝較近的邊緣走出去」。
+
+
+def test_descend_enabled_still_descends():
+    """預設行為不可以被改壞：開著下降時，窄平台仍要往邊緣走。"""
+    c = NightWatchCore(potion_key="delete")
+    assert c.descend_enabled is True
+    c.tick(W(0.0, hp=0.90, pos=(50, 76), span=SPAN(3)))
+    c.tick(W(1.0, hp=0.95, pos=(50, 76), span=SPAN(3)))
+    for t in range(2, 40):
+        c.tick(W(float(t), hp=0.95, pos=(50, 76), span=SPAN(3, dl=2, dr=30)))
+    assert c.stats.descents >= 1

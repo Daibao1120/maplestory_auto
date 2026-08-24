@@ -250,6 +250,8 @@ class NightWatchCore:
         self._silent_reason = ""      # 進入 IDLE_SILENT 的原因（決定能否自動恢復）
         self._modal_gone_since: Optional[float] = None
         self._others_since: Optional[float] = None
+        # 是否允許「主動走下窄平台去找寬平台」。單平台掛機一律關掉。
+        self.descend_enabled = True
         self.patrol_enabled = False
         self.patrol_every = (25.0, 40.0)
         self.patrol_step = 0.35
@@ -544,6 +546,15 @@ class NightWatchCore:
     def _tick_descend(self, w, acts):
         if w.pos is None or w.span is None:
             return   # 看門狗負責計時
+        if not self.descend_enabled:
+            # 單平台掛機：主動走下平台永遠不是想要的行為。而且寬度量測一旦被
+            # 繪圖縫切碎，核心會以為自己站在窄崖上，把一個好好的平台走下去——
+            # 那正是「掛著掛著就掉出平台」的成因。直接開打；FARM 裡的巡邏另有
+            # PATROL_MIN_WIDTH 守衛，量到太窄時它會原地不動，站著打不會掉下去。
+            self._farm_y = w.pos[1]
+            self._to("FARM", acts,
+                     f"單平台模式：不下降，就地開打（量到寬度 {w.span['width']:.1f}）", w)
+            return
         if w.span["width"] >= self.WIDE_ENOUGH:
             self._farm_y = w.pos[1]
             self._to("FARM", acts, f"到達寬平台（{w.span['width']:.1f}）", w)
@@ -1208,6 +1219,10 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
                                                .get("last_resort_hp", 0.20)))
     core.on_others = core_on_others
     pt = (cfg.get("combat", {}) or {}).get("patrol") or {}
+    core.descend_enabled = bool((cfg.get("combat", {}) or {})
+                                .get("descend_enabled", True))
+    if not core.descend_enabled:
+        log("下降：關閉（單平台模式——絕不主動走下平台）")
     core.patrol_enabled = bool(pt.get("enabled", False))
     core.patrol_every = (float(pt.get("min_seconds", 25)),
                          float(pt.get("max_seconds", 40)))
