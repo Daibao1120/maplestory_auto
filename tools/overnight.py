@@ -846,7 +846,8 @@ class Perception:
         self.exp_roi_auto = None
         self.calibrated = False
         self.calib_note = ""
-        self.in_game = True          # HP/MP 條同時存在＝真的在遊戲畫面內
+        self.in_game = True          # 有 HP 條＝真的在遊戲畫面內
+        self._mp_missing_logged = False
         self._not_in_game = 0
         self._pos_miss = 0          # 連續讀不到玩家點的次數 → 觸發重新校準
         self._recalib_at = 0.0
@@ -981,7 +982,13 @@ class Perception:
         # 不在遊戲中時所有讀值都沒有意義，且核心不該送任何按鍵。
         from src.vision import find_bars_pair
         _hp_b, _mp_b = find_bars_pair(raw)
-        self._not_in_game = 0 if (_hp_b and _mp_b) else self._not_in_game + 1
+        # 只認 HP 條。MP 條是靠「藍色填充段」找的，長度不足 HP 的 8% 就找不到——
+        # 也就是說 MP 快見底時會被判成「不在遊戲中」，整夜停手。對法師之類的
+        # 耗魔職業幾乎必中。登入/選頻/斷線畫面同樣沒有 HP 條，單靠 HP 已足以分辨。
+        self._not_in_game = 0 if _hp_b else self._not_in_game + 1
+        if _hp_b and not _mp_b and not self._mp_missing_logged:
+            self._mp_missing_logged = True
+            info["mp_bar_missing"] = True
         self.in_game = self._not_in_game < 6
         info["in_game"] = self.in_game
         if not self.in_game:
@@ -999,6 +1006,7 @@ class Perception:
         # EXP 變化（同時記錄時間戳供估算每小時進帳）
         if self.modal_enabled:
             w.modal = self.modal.update(frame)
+            w.modal_ok = True          # 偵測確實跑過這一幀（見 WorldState.modal_ok）
             info["modal"] = w.modal
         if self.others_enabled and pos is not None:
             w.others_near = self.mm.others_near(raw, pos, self.others_dy,
@@ -1102,11 +1110,7 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
     ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if ROOT not in sys.path:
         sys.path.insert(0, ROOT)
-    import numpy as np
     import yaml
-    from src.capture import ScreenCapture
-    from src.vision import MinimapLocator, PlayerTracker, PlayerAnchor
-    from src.vision.monster import MonsterDetector
     from tools.hold_and_wiggle import (_send_key, _find_window, _foreground,
                                        _PhysicalKeys, _right_click_at, _pressed, _VK)
 
@@ -1125,139 +1129,37 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
 
     with open(os.path.join(ROOT, "config", "settings.yaml"), encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    cap = ScreenCapture(backend="mss", window_title=cfg["window"]["title"])
-    mmloc = MinimapLocator(cfg["vision"]["minimap"])
-    tracker = PlayerTracker()
-    # 怪物偵測（模板匹配）——找怪是本工具的核心任務
-    mon_cfg = cfg["vision"]["monster"]
-    mondet = MonsterDetector(mon_cfg)
-    mondet.load_templates()
-    y_band = cfg.get("combat", {}).get("attack_y_band") or [-60, 60]
-    mon_every = float(mon_cfg.get("detect_interval", 0.7))
-    mon_state = {"t": 0.0, "left": 0, "right": 0}
-    # 角色螢幕定位：鏡頭夾邊時角色不在畫面中央（實測偏移 56×182px），
-    # 用名牌模板定位才能正確判斷「怪在左邊還右邊 / 是不是同一層」。
-    pa_cfg = cfg.get("vision", {}).get("player_anchor") or {}
-    anchor = PlayerAnchor(
-        template_path=os.path.join(ROOT, pa_cfg.get(
-            "template", "assets/templates/player/nametag.png")),
-        feet_offset_y=pa_cfg.get("feet_offset_y", 6),
-        threshold=pa_cfg.get("match_threshold", 0.75))
-    log("角色定位：" + ("名牌模板可用" if anchor.available else "找不到名牌模板 → 退回畫面中央"))
+    # 感知層一律走 Perception：這裡原本有一份私有的 sense()，只設了
+    # frame_ok/fg/window/pos/span/hp/exp_changed/mon_left/mon_right/user_touch/cmd，
+    # 從來沒設 modal、mp、mon_hint、others_near。後果是彈窗（測謊）偵測在唯一
+    # 的無人值守工具裡完全是死的——腳本會抓著 ctrl 穿過測謊視窗。而且它把
+    # 原始 2736 寬的畫面直接餵給怪物偵測，但 roi/template_scale 都是基準尺度，
+    # 所以 mon_left/mon_right 恆為 0，面向永遠退回 20 秒盲翻。
+    # 控制台與 selftest 早就走 Perception；改成同一條路，selftest 驗的才是實跑的東西。
+    per = Perception(cfg, ROOT)
+    log("感知層：Perception（正規化畫面＋UI 自動校準＋彈窗/遇人/動靜偵測）")
     hwnd = _find_window(cfg["window"]["title"])
     if not hwnd:
         log("找不到遊戲視窗，結束")
         return 1
     _foreground(hwnd)
     phys = _PhysicalKeys((0x25, 0x26, 0x27, 0x28))
-    buffdet = None
-    hp_band = {}
-    exp_roi = (1520, 1556, 1020, 1280)
-    prev_exp = [None]
 
-    def red_mask(crop):
-        b = crop[:, :, 0].astype(int)
-        g = crop[:, :, 1].astype(int)
-        r = crop[:, :, 2].astype(int)
-        return (r > 150) & (r - g > 60) & (r - b > 60)
-
-    def locate_hp(frame):
-        m = red_mask(frame[1540:1596, 560:1300])
-        best = (0, 0, 0, 0)
-        for y in range(m.shape[0]):
-            n = st = 0
-            for i, v in enumerate(m[y]):
-                if v:
-                    if n == 0:
-                        st = i
-                    n += 1
-                    if n > best[0]:
-                        best = (n, st, i, y)
-                else:
-                    n = 0
-        L, s, _e, y = best
-        if L < 40:
-            return False
-        hp_band["roi"] = (1540 + y - 4, 1540 + y + 5, 560 + s - 2,
-                          min(1300, 560 + s + int(L / 0.89) + 10))
-        hp_band["full"] = int(L / 0.89)
-        log(f"HP 條 y≈{1540 + y}，滿血寬估 {hp_band['full']}")
-        return True
-
-    def sense(now):
-        try:
-            frame = cap.grab()
-        except Exception:
-            frame = None
-        w = WorldState(now=now)
-        w.window = bool(hwnd and _user32.IsWindow(hwnd))
-        w.fg = bool(w.window and _user32.GetForegroundWindow() == hwnd)
-        if frame is None or float(frame.mean()) < 3:
-            w.frame_ok = False
-            return w, None
-        pos = tracker.update(mmloc.locate_player_candidates(frame))
-        w.pos = pos
-        w.span = mmloc.platform_span(frame, pos) if pos else None
-        if hp_band:
-            y1, y2, x1, x2 = hp_band["roi"]
-            wred = red_mask(frame[y1:y2, x1:x2]).any(axis=0).sum()
-            w.hp = float(wred) / max(1, hp_band["full"])
-        y1, y2, x1, x2 = exp_roi
-        cur = frame[y1:y2, x1:x2].astype(np.int16)
-        if prev_exp[0] is not None:
-            w.exp_changed = float(np.abs(cur - prev_exp[0]).mean()) > 1.5
-        prev_exp[0] = cur
-        # 找怪：以「角色真實螢幕位置」為原點，數左右兩側同一層的怪
-        if now - mon_state["t"] >= mon_every:
-            mon_state["t"] = now
-            try:
-                h, wpx = frame.shape[:2]
-                ap = anchor.find(frame) if anchor.available else None
-                axm, aym = ap if ap else (wpx // 2, h // 2)
-                lo, hi = y_band
-                left = right = 0
-                for d in mondet.detect(frame):
-                    # 用「怪的底部」對齊「角色腳底」判斷是否同一層
-                    if not (lo <= (d.y + d.h) - aym <= hi):
-                        continue          # 別層的怪，箭是水平飛的射不到
-                    if d.center[0] < axm:
-                        left += 1
-                    else:
-                        right += 1
-                mon_state["left"], mon_state["right"] = left, right
-            except Exception:
-                pass
-        w.mon_left, w.mon_right = mon_state["left"], mon_state["right"]
-        w.user_touch = phys.ok and any(
-            phys.state.get(v, False) for v in (0x25, 0x26, 0x27, 0x28))
+    def read_cmd():
         try:
             with open(cmd_path, encoding="utf-8") as f:
-                w.cmd = f.read().strip().lower()
+                return f.read().strip().lower()
         except Exception:
-            w.cmd = ""
-        return w, frame
+            return ""
 
-    def detect_buff(frame):
-        nonlocal buffdet
-        if frame is None:
-            return None
-        try:
-            if buffdet is None:
-                h, wpx = frame.shape[:2]
-                buffdet = MonsterDetector({
-                    "template_dir": os.path.join(ROOT, "assets", "templates", "buffs"),
-                    "match_threshold": 0.80,
-                    "roi": [int(wpx * 0.55), 0, wpx - int(wpx * 0.55), int(h * 0.25)],
-                    "nms_iou": 0.3})
-                buffdet.load_templates()
-            dets = buffdet.detect(frame)
-            if dets:
-                win = cap.locate_window()
-                ox, oy = (win.left, win.top) if win else (0, 0)
-                return (ox + dets[0].center[0], oy + dets[0].center[1])
-        except Exception:
-            pass
-        return None
+    def sense(now):
+        """Perception 只負責「看」，不知道視窗焦點與使用者的手；那三項由這層補。"""
+        w, frame, info = per.snapshot(now, cmd=read_cmd())
+        w.window = bool(hwnd and _user32.IsWindow(hwnd))
+        w.fg = bool(w.window and _user32.GetForegroundWindow() == hwnd)
+        w.user_touch = phys.ok and any(
+            phys.state.get(v, False) for v in (0x25, 0x26, 0x27, 0x28))
+        return w, frame, info
 
     def tap_key(key, hold):
         _send_key(key, keyup=False)
@@ -1316,9 +1218,8 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
             f"{core.PATROL_MIN_WIDTH:.0f} 的平台）")
     log(f"補血模式：{heal_mode}"
         + ("（寵物/使用者負責，核心不碰藥水鍵）" if heal_mode == "external" else ""))
-    f0 = cap.grab()
-    if f0 is None or not locate_hp(f0):
-        log("HP 條定位失敗（core 將因 hp=None 進入安全模式）")
+    fg_lost = [None]
+    in_game_last = [True]
     log(f"守夜 v2 開始（上限 {max_seconds/3600:.1f}h）")
     try:
         while core.state != "STOPPED":
@@ -1326,17 +1227,45 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
                 log("F12 → 結束")
                 break
             now = time.time()
-            w, frame = sense(now)
+            w, frame, info = sense(now)
             if core.state == "FARM":
-                w.buff_hit = detect_buff(frame)
+                w.buff_hit = per.find_buff(frame)
+            # 沒有前景就完全停手，而且不留任何紀錄——半夜一個通知彈窗就能讓
+            # 整晚停擺且 log 一片空白。至少要看得出來卡在哪。
+            if not w.fg:
+                if fg_lost[0] is None:
+                    fg_lost[0] = now
+                    log("視窗失去前景 → 暫停所有輸入（回到遊戲視窗即自動繼續）")
+            elif fg_lost[0] is not None:
+                log(f"視窗回到前景（暫停了 {now - fg_lost[0]:.0f} 秒）→ 繼續")
+                fg_lost[0] = None
+            if info.get("in_game") is False and in_game_last[0]:
+                log("偵測到不在遊戲畫面內（登入/選頻/斷線？）→ 停手等待")
+            elif info.get("in_game") and not in_game_last[0]:
+                log("回到遊戲畫面 → 繼續")
+            in_game_last[0] = bool(info.get("in_game"))
             for a in core.tick(w):
                 do(a)
             try:
+                span_w = (w.span or {}).get("width")
                 with open(status_path, "w", encoding="utf-8") as f:
                     json.dump({"state": core.state, "t": time.strftime("%H:%M:%S"),
                                "hp": None if w.hp is None else round(w.hp, 2),
+                               "mp": None if w.mp is None else round(w.mp, 2),
                                "pos": w.pos, "exp_count": core.stats.exp_count,
                                "potion_works": core.potion_works,
+                               # 以下四項是事後排查「整夜零經驗」的關鍵證據：
+                               # 平台量到多寬（決定進不進得了 FARM）、有沒有看到怪、
+                               # 有沒有彈窗、進帳速率。少了它們只能猜。
+                               "span_width": None if span_w is None else round(span_w, 1),
+                               "wide_enough": (span_w is not None
+                                               and span_w >= core.WIDE_ENOUGH),
+                               "mon_left": w.mon_left, "mon_right": w.mon_right,
+                               "modal": bool(w.modal), "in_game": info.get("in_game"),
+                               "calibrated": info.get("calibrated"),
+                               "exp_per_hour": round(info.get("exp_per_hour", 0.0), 1),
+                               "not_foreground_s": (None if fg_lost[0] is None
+                                                    else round(now - fg_lost[0])),
                                "stats": vars(core.stats)}, f, ensure_ascii=False)
             except Exception:
                 pass
@@ -1349,7 +1278,10 @@ def run_daemon(cmd_path, status_path, log_path, max_seconds=7.5 * 3600):
                 _send_key(k, keyup=True)
             except Exception:
                 pass
-        cap.close()
+        try:
+            per.cap.close()
+        except Exception:
+            pass
         log(f"守夜結束。EXP {core.stats.exp_count} 次、藥 {core.stats.potions} 次、"
             f"推回 {core.stats.guard_pushes} 次、自動恢復 {core.stats.recoveries} 次")
         logf.close()
