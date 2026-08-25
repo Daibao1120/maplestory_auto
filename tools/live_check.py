@@ -67,6 +67,12 @@ def main(argv=None):
     if args.save:
         os.makedirs(args.save, exist_ok=True)
 
+    # 模擬「判斷閘」的決定：不送任何按鍵，只印出它此刻會不會持續開火。
+    # 這是使用者最想知道的事——腳本現在到底會不會朝空氣射。
+    HIT_MEMORY = 1.2
+    gate = Counter()
+    last_dealt = [None]
+
     ok = Counter()
     n = 0
     ms = []
@@ -100,6 +106,14 @@ def main(argv=None):
         mine += len(m)
         others += sum(1 for g in groups if g.kind == "dealt") - len(m)
         taken += sum(1 for g in groups if g.kind == "taken")
+
+        # 判斷閘會怎麼決定（不送按鍵，只記錄）
+        if m or (dmg.last_taken is not None
+                 and time.time() - dmg.last_taken < 1e-6):
+            last_dealt[0] = time.time()
+        open_now = (last_dealt[0] is not None
+                    and time.time() - last_dealt[0] <= HIT_MEMORY)
+        gate["開" if open_now else "關"] += 1
 
         # UI 校準與 EXP 進帳
         hp, mp = find_bars_pair(raw)
@@ -162,7 +176,16 @@ def main(argv=None):
         print(f"    → 這張圖 {others / (mine + others):5.0%} 的傷害數字不是你打的。"
               f"沒有角色定位就會全部算成自己的 → 一路空揮")
     print(f"  EXP 進帳：{exp_hits} 次（{exp_hits / max(dur, 1) * 3600:.0f} 次/小時）")
-    print("\n  註：本工具只讀畫面。要驗證按鍵送不送得進遊戲，用 run_snake_sweep_admin.bat。")
+    tot = gate["開"] + gate["關"]
+    if tot:
+        pct_on = gate["開"] / tot
+        print()
+        print(f"  判斷閘（模擬，不含暖機與試打）：持續開火 {pct_on:.0%}、"
+              f"停火 {1 - pct_on:.0%}")
+        print("    停火期間腳本只會每 2 秒試打 2 下並走動。停火比例越高，"
+              "以前浪費掉的攻擊就越多。")
+    print("\n  註：本工具只讀畫面。要驗證按鍵送不送得進遊戲，"
+          "用 tools/run_snake_sweep_admin.bat。")
     return 0
 
 

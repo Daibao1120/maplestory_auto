@@ -95,10 +95,16 @@ REM                           toward the platform center first, and the return
 REM                           leg is slightly shorter, so each shuffle nudges
 REM                           you back toward center.
 REM ---- CURRENT SETUP: NO automatic movement at all (user decision) ----
-REM The tool ONLY: spams the attack key + auto right-clicks away unwanted buffs.
+REM The tool ONLY: attacks + auto right-clicks away unwanted buffs.
 REM YOU handle all movement/repositioning yourself (arrow keys pause it, hold
 REM Ctrl to resume attacking). Note: standing still ~60s stales attacks -- take
 REM a small step yourself once in a while.
+REM
+REM Target check is ON by default now: it only sustains fire while your OWN
+REM damage numbers are landing. This branch used to hold Ctrl down forever
+REM without ever asking whether anything was in front of you -- that was the
+REM single biggest source of "it shoots at empty air". Add --no-target-check
+REM to go back to the old unconditional behaviour.
 %PYCMD% tools\hold_and_wiggle.py --key ctrl --hold-attack --no-move --dispel-buff --face left --fixed-face --no-smart-face --no-refocus
 
 echo.

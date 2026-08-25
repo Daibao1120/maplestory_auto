@@ -400,6 +400,11 @@ class HoldWiggle:
         self._loc_miss = 0
         self._loc_warned = False
         self._hit_side = None       # 最近打到的東西在自己的哪一邊
+        self._grab_fail = 0
+        self._gate_t0 = None
+        self._gate_open = False
+        self._gate_blind_since = None
+        self._gate_blind_warned = False
         self._air_skips = 0         # 因為前面沒怪而略過的攻擊次數
         self._stand_since = None    # 站定輸出的起始時間（防定點失效用）
         self.meter = meter and not dry_run            # 戰績計：估打怪頻率，用來比較設定
@@ -933,6 +938,50 @@ class HoldWiggle:
     # 已經很寬鬆；而每多留 1 秒，怪死之後就多約 10 下空揮（attack_interval 0.10）。
     HIT_MEMORY = 1.2
     LOC_MISS_LIMIT = 20         # 連續定位不到幾次就放棄歸屬、退回照打
+    GRAB_FAIL_LIMIT = 12        # 連續抓不到畫面幾次就放棄，退回照打
+    GATE_WARMUP = 8.0           # 開跑後這麼久內一律放行——證據還來不及建立
+    BLIND_LIMIT = 90.0          # 閘就緒卻這麼久沒有任何自己的傷害 → 判定失準，放行
+
+    def _target_gate(self, now):
+        """要不要持續攻擊。回傳 (放行, 原因)。所有攻擊路徑都必須走這裡。
+
+        先前只有掃蕩會判斷；而 run_hold_wiggle_admin.bat 用的是
+        --hold-attack --no-move，走的是另一條分支，那條從頭到尾沒問過有沒有
+        目標，會一路壓著 Ctrl 打空氣——這是「還是會空射」最直接的原因。
+
+        任何一種失效都**放行**（照原節奏打），絕不變成「永遠不出手」：
+        後者比空揮更糟。
+        """
+        if self.dry_run or not self.target_check:
+            return True, "未啟用"
+        self._damage_tick(now)
+        if self._dmg_broken:
+            return True, "偵測不可用"
+        if self._gate_t0 is None:
+            self._gate_t0 = now
+        if now - self._gate_t0 < self.GATE_WARMUP:
+            return True, "暖機中"
+        ev = self._last_dmg
+        if ev is not None and now - ev <= self.HIT_MEMORY:
+            self._gate_blind_since = None
+            if self._gate_blind_warned:
+                self._gate_blind_warned = False
+                print("  ✓ 又打得到了 → 恢復「打得到才持續輸出」")
+            return True, "打得到"
+        # 閘就緒卻長時間完全沒有自己的傷害 → 多半是歸屬失準（換裝備／換地圖／
+        # 站的高度不同）。繼續關著就等於整晚不出手。
+        if ev is None:
+            if self._gate_blind_since is None:
+                self._gate_blind_since = now
+            if now - self._gate_blind_since >= self.BLIND_LIMIT:
+                if not self._gate_blind_warned:
+                    self._gate_blind_warned = True
+                    print(f"  ⚠ {self.BLIND_LIMIT:.0f} 秒沒偵測到任何自己打出的傷害"
+                          f" → 目標判定可能失準，暫時改回照打"
+                          f"（換過帽子就跑 tools/grab_helmet.py）")
+                return True, "長時間無證據"
+        return False, "打不到"
+
     DMG_EVERY = 0.25            # 看畫面的節流
     # 打不到時仍要偶爾試打，否則永遠不知道新位置打不打得到。但不能每走一步就試，
     # 那在空曠區段等於一路開火。改用時間節流：每 PROBE_EVERY 秒試 PROBE_SHOTS 下。
@@ -988,7 +1037,12 @@ class HoldWiggle:
             cv2 = self._cv2
             raw = self._cap.grab()
             if raw is None:
+                self._grab_fail += 1
+                if self._grab_fail >= self.GRAB_FAIL_LIMIT:
+                    self._dmg_broken = True
+                    print("  （連續抓不到畫面 → 目標判定停用，改回照原節奏攻擊）")
                 return
+            self._grab_fail = 0
             fr = raw
             if (raw.shape[1], raw.shape[0]) != self._canon:
                 fr = cv2.resize(raw, self._canon, interpolation=cv2.INTER_AREA)
@@ -1010,8 +1064,10 @@ class HoldWiggle:
                 self._dmg_count += len(mine)
                 if self._dmgw.last_side:
                     self._hit_side = self._dmgw.last_side
-            elif self._dmgw.last_taken == now:
-                self._last_dmg = now      # 正在被打＝怪就在身上，當然要還手
+            elif (self._dmgw.last_taken is not None
+                  and now - self._dmgw.last_taken < 1e-6):
+                # 正在被打＝怪就在身上，當然要還手。用容差比較，不用浮點相等。
+                self._last_dmg = now
         except Exception as e:
             self._dmg_broken = True
             print(f"  （傷害偵測出錯：{e} → 改回照原節奏攻擊）")
@@ -1022,9 +1078,7 @@ class HoldWiggle:
         原本是「照著走的方向一路開火」，怪不在那邊時整趟都在空揮。這裡把
         持續攻擊的前提換成「最近真的跳過傷害數字」——打到東西的直接證據。
         """
-        hitting = (self._last_dmg is not None
-                   and now - self._last_dmg <= self.HIT_MEMORY)
-        if hitting:
+        if self._gate_open:
             if self._stand_since is None:
                 self._stand_since = now
             elif now - self._stand_since >= self.STAND_SHUFFLE_AFTER:
@@ -1518,9 +1572,8 @@ class HoldWiggle:
                     if self.meter:
                         self._meter_tick(now)
                     if self.sweep:
-                        if self.target_check:
-                            self._damage_tick(now)
-                            now = time.time()
+                        self._gate_open, _why = self._target_gate(now)
+                        now = time.time()
                         if self.target_check and not self._dmg_broken:
                             # 打得到就站定輸出、打不到就走去找
                             self._sweep_by_damage(now)
@@ -1545,15 +1598,35 @@ class HoldWiggle:
                         wait = self._next_interval()
                         self._next_attack = 0.0  # 移動後立刻接回攻擊（下一圈馬上點）
                         print(f"  （下次移動：{wait:.0f} 秒後）")
-                    elif self.hold_attack:
-                        self._attack_hold_tick(now)
-                    elif now >= self._next_attack:
-                        self._attack_once()
-                        # 攻擊間隔帶抖動、偶爾停頓一下——人不會用碼表點鍵
-                        gap = self.attack_interval * random.uniform(0.85, 1.30)
-                        if random.random() < 0.02:
-                            gap += random.uniform(0.6, 1.6)
-                        self._next_attack = time.time() + gap
+                    else:
+                        # 定點攻擊（--no-move、或兩次挪步之間）也要問過目標判斷。
+                        # 這條分支以前完全沒判斷，是「一路壓著 Ctrl 打空氣」的來源。
+                        allow, _why = self._target_gate(now)
+                        now = time.time()
+                        if allow:
+                            if self.hold_attack:
+                                self._attack_hold_tick(now)
+                            elif now >= self._next_attack:
+                                self._attack_once()
+                                # 攻擊間隔帶抖動、偶爾停頓——人不會用碼表點鍵
+                                gap = self.attack_interval * random.uniform(0.85, 1.30)
+                                if random.random() < 0.02:
+                                    gap += random.uniform(0.6, 1.6)
+                                self._next_attack = time.time() + gap
+                        else:
+                            # 沒有目標：放開攻擊鍵，只保留節流的試打
+                            self._attack_release()
+                            if (self._probe_left <= 0
+                                    and now - self._last_probe >= self.PROBE_EVERY):
+                                self._probe_left = self.PROBE_SHOTS
+                                self._last_probe = now
+                                self._next_attack = 0.0
+                            if self._probe_left > 0 and now >= self._next_attack:
+                                self._attack_once()
+                                self._probe_left -= 1
+                                self._next_attack = now + self.attack_interval
+                            else:
+                                self._air_skips += 1
 
                 elif state == "PAUSED":
                     d = self._user_direction()      # 暫停期間持續記住你面對的方向

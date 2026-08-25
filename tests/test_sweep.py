@@ -254,7 +254,7 @@ def dmg_sweeper(**kw):
 
 def test_keeps_attacking_while_damage_is_landing():
     hw = dmg_sweeper()
-    hw._last_dmg = 100.0
+    hw._gate_open = True                  # 判斷閘說打得到
     hw._sweep_by_damage(100.5)
     assert hw.attacks == ["atk"]
     assert hw.steps == [], "打得到卻走掉了"
@@ -263,7 +263,7 @@ def test_keeps_attacking_while_damage_is_landing():
 def test_stops_attacking_once_damage_stops():
     """傷害停了就是打不到——這正是空揮的來源。"""
     hw = dmg_sweeper()
-    hw._last_dmg = 100.0
+    hw._gate_open = False                     # 判斷閘說打不到
     hw._last_step = 1e9                       # 還不到走下一步的時間
     hw._last_probe = 1e9                      # 也還不到試打的時間
     hw._sweep_by_damage(100.0 + hw.HIT_MEMORY + 0.1)
@@ -275,7 +275,7 @@ def test_probes_are_time_throttled_not_continuous():
     """完全不打會有另一個問題：永遠不知道新位置打不打得到。
     但試打必須有節流——每一刻都試等於一路開火，跟原本的空揮沒兩樣。"""
     hw = dmg_sweeper()
-    hw._last_dmg = None
+    hw._gate_open = False
     hw._last_step = 1e9
     hw._last_probe = 0.0
     t = 100.0
@@ -294,7 +294,7 @@ def test_hold_mode_releases_the_key_when_damage_stops():
     ups = []
     hw._up = lambda k: ups.append(k)
     hw._atk_held = True
-    hw._last_dmg = None
+    hw._gate_open = False
     hw._last_step = 1e9
     hw._last_probe = 1e9
     hw._sweep_by_damage(100.0)
@@ -305,11 +305,10 @@ def test_hold_mode_releases_the_key_when_damage_stops():
 def test_standing_still_too_long_triggers_an_anti_stale_shuffle():
     """定點輸出約 60 秒後攻擊會失效，失效判定看的是水平位移（原地跳無效）。"""
     hw = dmg_sweeper()
-    hw._last_dmg = 100.0
+    hw._gate_open = True
     hw._sweep_by_damage(100.1)
     assert hw._stand_since == 100.1
     hw.steps.clear()
-    hw._last_dmg = 100.0 + hw.STAND_SHUFFLE_AFTER
     hw._sweep_by_damage(100.1 + hw.STAND_SHUFFLE_AFTER + 0.1)
     assert set(hw.steps) == {"left", "right"}, "碎步要有來有回，淨位移接近 0"
 
@@ -344,7 +343,7 @@ def test_losing_the_player_for_too_long_falls_back_to_plain_attacking():
 
 def test_turns_back_toward_the_side_it_last_hit():
     hw = dmg_sweeper()
-    hw._last_dmg = None
+    hw._gate_open = False
     hw._last_step = 1e9
     hw._last_probe = 1e9
     hw._hit_side = "left"
@@ -352,3 +351,80 @@ def test_turns_back_toward_the_side_it_last_hit():
     hw._since_turn = 5
     hw._sweep_by_damage(100.0)
     assert hw._sweep_dir == -1
+
+
+# ---- 統一判斷閘：所有攻擊路徑都必須問過 ----
+#
+# 使用者實跑的 run_hold_wiggle_admin.bat 用 --hold-attack --no-move，走的是
+# 定點攻擊分支——那條分支以前完全沒有問過有沒有目標，會一路壓著 Ctrl 打空氣。
+# 這是「還是會空射」最直接的原因，而測試完全沒涵蓋到，因為測試只驗掃蕩。
+
+def gated(**kw):
+    hw = sweeper(**kw)
+    hw.target_check = True
+    hw.dry_run = False
+    hw._dmg_ready, hw._dmg_broken = True, False
+    hw._damage_tick = lambda now: None
+    return hw
+
+
+def test_every_attack_path_consults_the_gate():
+    """靜態檢查：主迴圈裡不可以有繞過 _target_gate 的攻擊呼叫。"""
+    import inspect
+    from tools.hold_and_wiggle import HoldWiggle
+    src = inspect.getsource(HoldWiggle.run)
+    body = src[src.index('state == "RUNNING"'):src.index('elif state == "PAUSED"')]
+    assert body.count("_target_gate") >= 2, "有攻擊路徑沒問過目標判斷"
+
+
+def test_gate_opens_during_warmup():
+    """一開跑就關著閘，會在證據建立前先誤判成打不到。"""
+    hw = gated()
+    hw._last_dmg = None
+    allow, why = hw._target_gate(1000.0)
+    assert allow and why == "暖機中"
+
+
+def test_gate_closes_when_nothing_is_being_hit():
+    hw = gated()
+    hw._gate_t0 = 0.0
+    hw._last_dmg = 100.0
+    allow, _ = hw._target_gate(100.0 + hw.HIT_MEMORY + 0.1)
+    assert not allow
+
+
+def test_gate_reopens_after_long_blindness():
+    """換裝備／換地圖會讓歸屬失準。關著不放等於整晚不出手，比空揮更糟。"""
+    hw = gated()
+    hw._gate_t0 = 0.0
+    hw._last_dmg = None
+    assert hw._target_gate(100.0)[0] is False          # 先關起來
+    allow, why = hw._target_gate(100.0 + hw.BLIND_LIMIT + 1)
+    assert allow and why == "長時間無證據"
+
+
+def test_gate_fails_open_when_detection_is_broken():
+    hw = gated()
+    hw._dmg_broken = True
+    assert hw._target_gate(1000.0)[0] is True
+
+
+def test_gate_is_transparent_in_dry_run():
+    hw = sweeper()
+    assert hw._target_gate(1000.0) == (True, "未啟用")
+
+
+def test_repeated_grab_failures_disable_the_gate():
+    """抓不到畫面就永遠關著閘＝整晚不出手。"""
+    hw = gated()
+    hw._damage_tick = None
+    from tools.hold_and_wiggle import HoldWiggle
+    hw._damage_tick = HoldWiggle._damage_tick.__get__(hw)
+    hw._init_damage = lambda: True
+    hw._cv2 = __import__("cv2")
+    hw._canon = (8, 8)
+    hw._cap = type("C", (), {"grab": lambda self: None})()
+    for i in range(hw.GRAB_FAIL_LIMIT):
+        hw._dmg_next = 0.0
+        hw._damage_tick(100.0 + i)
+    assert hw._dmg_broken is True
