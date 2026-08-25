@@ -334,7 +334,7 @@ class HoldWiggle:
                  alternate_face=True, swap_every=1,
                  smart_face=True, shuffle=False, sweep=False, sweep_steps=8,
                  step_interval=0.45, start_paused=False, adaptive_sweep=False,
-                 meter=False,
+                 meter=False, target_check=True,
                  tuning_path=None, dry_run=False):
         self.attack_key = attack_key
         self.interval_min = float(interval_min)
@@ -385,6 +385,20 @@ class HoldWiggle:
         self._dwell = 1.0                             # 目前的停留倍率（快取）
         self._dwell_next = 0.0                        # 下次量動靜的時間
         self._since_turn = 0                          # 這個方向已走幾步（折返遲滯用）
+        # 只在「看得到怪」時才出手。掃蕩原本純按方向打，怪不在那一邊時整趟都在
+        # 空揮——使用者實跑的第一個回報就是「會朝空氣攻擊」。
+        self.target_check = target_check and not dry_run
+        self._mondet = None
+        self._tgt = None            # 最近一次掃描結果
+        self._tgt_at = 0.0          # 上次掃描時間
+        self._tgt_seen = None       # 最後一次真的看到怪的時間
+        self._tgt_every = 0.30      # 掃描間隔（依實測耗時自動放寬）
+        self._tgt_ready = False
+        self._tgt_broken = False
+        self._tgt_blind = False
+        self._tgt_blind_warned = False
+        self._air_skips = 0         # 因為前面沒怪而略過的攻擊次數
+        self._stand_since = None    # 站定輸出的起始時間（防定點失效用）
         self.meter = meter and not dry_run            # 戰績計：估打怪頻率，用來比較設定
         self._meter_roi = None                        # EXP 數字區（自動定位）
         self._meter_prev = None
@@ -905,6 +919,125 @@ class HoldWiggle:
         time.sleep(0.05)
         return _user32.GetForegroundWindow() == self._hwnd
 
+    TARGET_BLIND_GRACE = 25.0   # 連續這麼久掃不到任何怪 → 判定偵測不可靠，改為照打
+    # 定點輸出約 60 秒後攻擊會失效（遊戲的定點判定），且失效看的是「水平位移」——
+    # 原地跳沒有用。看到怪就站定打的代價正是容易踩到這個，所以主動安排小碎步。
+    STAND_SHUFFLE_AFTER = 40.0
+
+    def _init_targets(self):
+        """延遲建立怪物偵測器。缺套件/沒模板都不算致命，只是退回照原節奏打。"""
+        if self._tgt_ready:
+            return True
+        if self._tgt_broken:
+            return False
+        try:
+            import cv2
+            if ROOT not in sys.path:
+                sys.path.insert(0, ROOT)
+            from src.vision.monster import MonsterDetector
+            from src.capture import ScreenCapture
+            self._cv2 = cv2
+            if self._cap is None:
+                self._cap = ScreenCapture(backend="mss",
+                                          window_title=self._window_keyword)
+            cfg = self._load_settings() or {}
+            v = cfg.get("vision", {}) or {}
+            cb = cfg.get("combat", {}) or {}
+            mon = dict(v.get("monster") or {})
+            mon["template_dir"] = os.path.join(
+                ROOT, mon.get("template_dir", "assets/templates/monsters"))
+            self._canon = tuple(v.get("canonical_size") or (1371, 808))
+            # 同層判定：怪的「底部」相對角色「腳底」的高度差。平射打不到別層的怪，
+            # 朝下一層的蛇開火就是最典型的空揮。
+            self._y_band = tuple(cb.get("attack_y_band") or (-60, 60))
+            self._atk_range = float(cb.get("attack_range_px", 700))
+            self._mondet = MonsterDetector(mon).load_templates()
+            names = self._mondet.template_names
+            if not names:
+                print("  （沒有怪物模板 → 不做目標確認，照原節奏攻擊）")
+                self._tgt_broken = True
+                return False
+            print(f"  ✓ 目標確認啟用：{len(names)} 張模板"
+                  f"（{', '.join(names[:4])}{'…' if len(names) > 4 else ''}），"
+                  f"同層帶 {self._y_band}、射程 {self._atk_range:.0f}")
+        except Exception as e:
+            print(f"  （怪物偵測初始化失敗：{e} → 照原節奏攻擊）")
+            self._tgt_broken = True
+            return False
+        self._tgt_ready = True
+        return True
+
+    def _scan_targets(self):
+        """掃一次畫面，回傳 (左邊幾隻, 右邊幾隻, 左最近距離, 右最近距離)。
+
+        座標一律先正規化到基準尺寸——模板是在 2736 寬截的，設定裡的 ROI 與
+        template_scale 也都是基準尺度，直接餵原始畫面會一隻都找不到。
+        """
+        raw = self._cap.grab()
+        if raw is None:
+            return None
+        cv2 = self._cv2
+        frame = raw
+        if (raw.shape[1], raw.shape[0]) != self._canon:
+            frame = cv2.resize(raw, self._canon, interpolation=cv2.INTER_AREA)
+        h, w = frame.shape[:2]
+        px, py = w // 2, h // 2      # 鏡頭沒夾邊時角色在畫面中央（與守夜同一假設）
+        lo, hi = self._y_band
+        left = right = 0
+        near_l = near_r = None
+        for d in self._mondet.detect(frame):
+            if not (lo <= (d.y + d.h) - py <= hi):
+                continue                       # 別層的怪，平射打不到
+            dx = d.center[0] - px
+            if dx < 0:
+                left += 1
+                near_l = -dx if near_l is None else min(near_l, -dx)
+            else:
+                right += 1
+                near_r = dx if near_r is None else min(near_r, dx)
+        return left, right, near_l, near_r
+
+    def _targets(self, now):
+        """節流地取得目標狀況；回傳 None ＝「不知道」（呼叫端應退回照打）。"""
+        if not self.target_check or self._tgt_broken:
+            return None
+        if now - self._tgt_at < self._tgt_every:
+            return None if self._tgt_blind else self._tgt
+        self._tgt_at = now
+        if not self._init_targets():
+            return None
+        t0 = time.perf_counter()
+        try:
+            r = self._scan_targets()
+        except Exception as e:
+            self._tgt_broken = True
+            print(f"  （怪物偵測出錯：{e} → 照原節奏攻擊）")
+            return None
+        cost = time.perf_counter() - t0
+        if cost > self._tgt_every * 0.8:
+            # 掃一次比掃描間隔還久 → 主迴圈會被拖住，自動放寬
+            self._tgt_every = min(1.2, cost * 1.6)
+        if r is None:
+            return self._tgt
+        self._tgt = r
+        if self._tgt_seen is None:
+            self._tgt_seen = now
+        if r[0] or r[1]:
+            self._tgt_seen = now
+        # 長期一隻都掃不到：多半是這張圖的怪沒有模板。此時「沒看到就不打」
+        # 會變成完全不打——寧可打空氣，也不要整晚不出手。
+        blind = (now - self._tgt_seen) > self.TARGET_BLIND_GRACE
+        if blind and not self._tgt_blind_warned:
+            self._tgt_blind_warned = True
+            print(f"  ⚠ 連續 {self.TARGET_BLIND_GRACE:.0f} 秒掃不到任何怪 → "
+                  f"暫時改回照打（這張圖的怪可能沒有模板；"
+                  f"用 tools/grab_template.py 補一張就會自動恢復）")
+        elif self._tgt_blind and not blind:
+            self._tgt_blind_warned = False
+            print("  ✓ 又看得到怪了 → 恢復「看到才打」")
+        self._tgt_blind = blind
+        return None if blind else self._tgt
+
     METER_EVERY = 1.0           # 每隔幾秒看一次 EXP 數字區有沒有變
     METER_REPORT_EVERY = 60.0   # 每隔幾秒回報一次戰績
 
@@ -982,7 +1115,8 @@ class HoldWiggle:
                   f"進帳次數還不夠估算（要滿 1 分鐘且有 2 次以上）")
         else:
             print(f"  📊 戰績：跑了 {mins:.0f} 分、走了 {self._meter_steps} 步，"
-                  f"進帳約 {rate:.0f} 次/小時（近 15 分鐘）")
+                  f"進帳約 {rate:.0f} 次/小時（近 15 分鐘）"
+                  + (f"；擋掉 {self._air_skips} 次空揮" if self._air_skips else ""))
 
     SWEEP_RETRY_EVERY = 8.0     # 盲走時每隔幾秒重試一次 edge-guard
     DWELL_CHECK_EVERY = 1.6     # 每隔幾秒量一次動靜（量一次要 0.15s，不能每步都量）
@@ -1031,6 +1165,60 @@ class HoldWiggle:
             print(f"  ⇦ 怪在身後（前{ahead}/後{behind}）→ 提前折返")
             return
         self._dwell = self.DWELL_SLOW if ahead > behind else 1.0
+
+    def _sweep_by_target(self, tg, now):
+        """看得到怪時的掃蕩行為：打得到就打、太遠就走過去、身後有就轉回去、
+        都沒有就繼續掃。
+
+        「朝空氣攻擊」的成因是攻擊與方向綁在一起，卻沒人問過那個方向有沒有東西。
+        這裡把攻擊的前提改成「那一側確實有同層的怪，而且在射程內」。
+        """
+        left, right, near_l, near_r = tg
+        facing_left = self._sweep_dir < 0
+        ahead, behind = (left, right) if facing_left else (right, left)
+        near_ahead = near_l if facing_left else near_r
+
+        if ahead and near_ahead is not None and near_ahead <= self._atk_range:
+            # 射程內有同層的怪 → 站定輸出，不要走掉
+            if self._stand_since is None:
+                self._stand_since = now
+            elif now - self._stand_since >= self.STAND_SHUFFLE_AFTER:
+                # 站太久，攻擊要失效了 → 走一小步再走回來。位移是重點，原地跳無效。
+                self._stand_since = now
+                self._attack_release()
+                back = "left" if self._sweep_dir > 0 else "right"
+                fwd = "right" if self._sweep_dir > 0 else "left"
+                self._tap(back, hold=0.12)
+                self._tap(fwd, hold=0.14)   # 回來時多一點，順便維持面向
+                self._release_moves()
+                self._next_attack = 0.0
+                print(f"  ↔ 站定輸出 {self.STAND_SHUFFLE_AFTER:.0f} 秒 → 小碎步防失效")
+                return
+            if self.hold_attack:
+                self._attack_hold_tick(now)
+            elif now >= self._next_attack:
+                self._attack_once()
+                self._next_attack = now + self.attack_interval *                     random.uniform(0.85, 1.30)
+            return
+
+        self._stand_since = None    # 只要開始移動，定點失效的計時就重來
+        # 以下都不該送出攻擊鍵——那正是空揮。按住模式下若不主動放開，
+        # 「不再呼叫 _attack_hold_tick」並不會讓鍵彈起來，會一路壓著打空氣。
+        self._attack_release()
+        self._air_skips += 1
+
+        if not ahead and behind:
+            # 怪全在身後 → 立刻轉回去，不要把剩下的空趟走完
+            if self._since_turn >= self.DWELL_MIN_STEPS:
+                self._sweep_dir *= -1
+                self._since_turn = 0
+                print(f"  ⇦ 怪在身後（前{ahead}/後{behind}）→ 轉回去打")
+
+        # 走一步：朝目標接近，或沒有目標時繼續掃找
+        if now - self._last_step >= self.step_interval:
+            self._sweep_step()
+            self._last_step = now
+            self._next_attack = 0.0
 
     def _sweep_step(self):
         """掃蕩走一步：走到 ±sweep_steps 折返；走完面向＝走的方向，接著的攻擊
@@ -1235,9 +1423,13 @@ class HoldWiggle:
         if self.sweep:
             # 掃蕩模式走的是完全不同的路徑，印舊巡邏的說明會讓人以為它沒在掃
             move_desc = (f"左右掃蕩：每 {self.step_interval:.2f}s 走一步、"
-                         f"單邊 {self.sweep_steps} 步折返，攻擊朝走的方向")
-            if self.adaptive_sweep:
-                move_desc += "；有怪就留下打完、沒怪就快走、怪在身後提前折返"
+                         f"單邊 {self.sweep_steps} 步折返")
+            if self.target_check:
+                move_desc += "；看到同層的怪才出手（射程外先走過去、怪在身後就轉回去）"
+            else:
+                move_desc += "，攻擊朝走的方向"
+                if self.adaptive_sweep:
+                    move_desc += "；有怪就留下打完、沒怪就快走"
         atk_desc = (f"按住「{self.attack_key}」攻擊（每 2~4 秒補壓防斷）" if self.hold_attack
                     else f"連點「{self.attack_key}」攻擊（每 {self.attack_interval:.2f}s 一下）")
         print("=" * 56)
@@ -1348,19 +1540,26 @@ class HoldWiggle:
                     if self.meter:
                         self._meter_tick(now)
                     if self.sweep:
-                        # 掃蕩：定時走一步，步與步之間持續攻擊
-                        if self.adaptive_sweep:
-                            self._sweep_sense()
-                            now = time.time()
-                        if now - self._last_step >= self.step_interval * self._dwell:
-                            self._sweep_step()
-                            self._last_step = now
-                            self._next_attack = 0.0   # 走完立刻朝該方向打
-                        elif self.hold_attack:
-                            self._attack_hold_tick(now)
-                        elif now >= self._next_attack:
-                            self._attack_once()
-                            self._next_attack = now + self.attack_interval *                                 random.uniform(0.85, 1.30)
+                        tg = self._targets(now)
+                        if tg is not None:
+                            # 看得到怪 → 由「怪在哪」決定要打還是要走。
+                            # 這才是真正治本的地方：原本不管前面有沒有東西都照打，
+                            # 怪站在另一邊時整趟都在空揮。
+                            self._sweep_by_target(tg, now)
+                        else:
+                            # 偵測不可用（沒模板／掃不到／出錯）→ 退回原本的定時節奏
+                            if self.adaptive_sweep:
+                                self._sweep_sense()
+                                now = time.time()
+                            if now - self._last_step >= self.step_interval * self._dwell:
+                                self._sweep_step()
+                                self._last_step = now
+                                self._next_attack = 0.0   # 走完立刻朝該方向打
+                            elif self.hold_attack:
+                                self._attack_hold_tick(now)
+                            elif now >= self._next_attack:
+                                self._attack_once()
+                                self._next_attack = now + self.attack_interval *                                     random.uniform(0.85, 1.30)
                     elif self.enable_move and now - cycle_start >= wait:
                         self._move()
                         self._release_moves()   # 保險絲：防 keyup 掉包卡鍵
@@ -1481,6 +1680,8 @@ def parse_args(argv=None):
     p.add_argument("--adaptive-sweep", action="store_true",
                    help="掃蕩時看哪邊有動靜：眼前有怪就多留一會兒打完，沒怪就快走去找，"
                         "怪在身後則提前折返（只改節奏，不會原地自己翻面）")
+    p.add_argument("--no-target-check", action="store_true",
+                   help="關掉「看到怪才出手」，改回不管前面有沒有東西都照打")
     p.add_argument("--meter", action="store_true",
                    help="戰績計：每分鐘回報「進帳次數/小時」，用數字比較不同設定的效果")
     p.add_argument("--start-paused", action="store_true",
@@ -1523,6 +1724,7 @@ def main(argv=None):
                     step_interval=args.step_interval,
                     start_paused=args.start_paused,
                     adaptive_sweep=args.adaptive_sweep, meter=args.meter,
+                    target_check=not args.no_target_check,
                     tuning_path=(args.tuning if os.path.isabs(args.tuning)
                                  else os.path.join(ROOT, args.tuning)),
                     dry_run=args.dry_run)

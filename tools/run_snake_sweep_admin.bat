@@ -59,6 +59,15 @@ REM                           on slopes -- that drift is what walks you off the 
 REM   --edge-margin 40        safe range = start x +/- this many minimap pixels.
 REM                           Your measured platform is ~107 wide, so 40 keeps a
 REM                           healthy buffer. SMALLER for a narrower platform.
+REM   (target check is ON by default) only attacks when a monster of the SAME
+REM                           LAYER is actually visible on the side you face and
+REM                           within range -- otherwise it walks instead of firing
+REM                           at empty air. Needs monster templates in
+REM                           assets	emplates\monsters (snake_01/02 are there).
+REM                           If nothing is detected for 25s it assumes this map's
+REM                           monster has no template and reverts to plain
+REM                           attacking, so it can never end up never attacking.
+REM                           Add --no-target-check to force the old behaviour.
 REM   --adaptive-sweep        watches which side has movement (monsters move, the
 REM                           background does not): lingers to finish off what is
 REM                           in front, walks faster when the area is cleared, and
