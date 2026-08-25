@@ -37,6 +37,7 @@ def find_platform_run(mask, px, py, gap_tol=1, min_run=5, dy_max=15, seed_r=4):
     找不到回傳 None。純邏輯（不需 cv2），可單獨測試。
     """
     h, w = mask.shape[:2]
+    cands = []
     for dy in range(0, dy_max):
         yy = py + dy
         if yy >= h:
@@ -65,8 +66,17 @@ def find_platform_run(mask, px, py, gap_tol=1, min_run=5, dy_max=15, seed_r=4):
 
         lx, rx = _extend(-1), _extend(1)
         if rx - lx + 1 >= min_run:
-            return yy, lx, rx
-    return None
+            cands.append((rx - lx + 1, yy, lx, rx))
+    if not cands:
+        return None
+    # 取**最寬**的那一列，不是最上面的那一列。
+    #
+    # 實測（164 幀）：玩家腳下 y=149 有一條稀疏的草緣，只有 6px 寬卻先被選中，
+    # 真正的地面在 y=150、寬 180px。回傳 6 的後果是 PATROL_MIN_WIDTH=12 永遠
+    # 過不了 → 巡邏從來沒有運作過，角色整夜站在一條 2270px 寬的平台上不動；
+    # 平台警衛也會以為自己離懸崖只有 4px。改成取最寬列之後 164/164 幀都是 179~180。
+    _w, yy, lx, rx = max(cands)
+    return yy, lx, rx
 
 
 class PlayerTracker:

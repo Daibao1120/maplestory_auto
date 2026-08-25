@@ -857,6 +857,7 @@ class Perception:
         self.canon = tuple(v.get("canonical_size") or [1371, 808])
         self.raw_size = None      # 最近一次原始畫面尺寸（換算螢幕座標用）
         self.cap = ScreenCapture(backend="mss", window_title=cfg["window"]["title"])
+        self.mm_cfg = dict(v["minimap"])
         self.mm = MinimapLocator(v["minimap"])
         self.tracker = PlayerTracker()
         pa = v.get("player_anchor") or {}
@@ -959,6 +960,23 @@ class Perception:
             self.mp_reader.rect = mp
             self.mp_reader.full = max(self.mp_reader.full, mp["len"])
         new_rect = find_minimap_rect(raw)
+        # 採用自動框之前先實測一次：用它去找玩家點，候選數應該很少（小地圖上
+        # 只有幾個亮點）。候選一大堆代表框到的是使用者開著的 UI 視窗——實測
+        # 曾框到 (0,0,820,558) 整個左上象限，然後玩家點鎖在視窗裡的靜態圖示上，
+        # 座標 164 幀完全不動，於是永遠不會重新校準，平台量測恆為 None，
+        # 45 秒後進 IDLE_SAFE 卡到天亮，log 只有一行。
+        if new_rect:
+            probe = MinimapLocator(dict(self.mm_cfg))
+            probe.roi = list(new_rect)
+            probe.reference_size = None
+            try:
+                cands = probe.locate_player_candidates(raw)
+            except Exception:
+                cands = []
+            if len(cands) > 3:
+                self.calib_note_mm = (f"自動框 {new_rect} 有 {len(cands)} 個玩家點候選"
+                                      f" → 判定框到 UI 視窗，沿用設定檔 ROI")
+                new_rect = None
         if new_rect and self.mm_rect:
             # 面板尺寸應該穩定；差太多代表這次抓到的是別的深色視窗 → 保留舊的
             ow, oh = self.mm_rect[2], self.mm_rect[3]
@@ -978,9 +996,16 @@ class Perception:
             self.mm.reference_size = None
         # MP 是選配（近戰職業可能不在意、或當下藍條空到看不見）——不可因為
         # 少了 MP 就把整個校準判定為失敗，那會連 EXP 偵測一起關掉。
-        ok = bool(hp and self.mm_rect and self.exp_roi_auto)
+        # 小地圖不列入校準成功條件：設定檔的 ROI + reference_size 是有效的後備
+        # （實測那條路量到的平台寬度 180，自動框反而是 None）。把它列為必要條件
+        # 會讓 calibrated 永遠是 False，而 snapshot 的重新校準分支對「還沒校準」
+        # 沒有節流 → 每一幀都跑兩次 find_bars_pair（實測 65ms 一次）。
+        ok = bool(hp and self.exp_roi_auto)
         self.calib_note = (f"HP{'' if hp else '✗'} MP{'' if mp else '✗'} "
-                           f"小地圖{self.mm_rect or '✗'} EXP{self.exp_roi_auto or '✗'}")
+                           f"小地圖{self.mm_rect or '設定檔ROI'} "
+                           f"EXP{self.exp_roi_auto or '✗'}")
+        if getattr(self, "calib_note_mm", None):
+            self.calib_note += f"｜{self.calib_note_mm}"
         self.calibrated = ok
         return ok
 

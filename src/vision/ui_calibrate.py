@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 try:
+    import numpy as _np
     import cv2  # type: ignore
     import numpy as np  # type: ignore
     _CV_AVAILABLE = True
@@ -43,23 +44,55 @@ def _color_mask(strip, color):
     return (b > 140) & (b - r > 40) & (b - g > 20)
 
 
+def _neutral_after(frame, y, x, n=8, tol=12, v_min=150, skip=2, need=0.75):
+    """條的右側緊接著是不是「中性灰的空槽」。
+
+    這是分辨真血條與同色 UI 按鈕的關鍵。血條畫在一個灰色凹槽裡，沒填滿的部分
+    露出 (204,204,204) 這種三通道相等的灰；按鈕右邊則是圖示或邊框，通道明顯
+    不相等（實測購物商場按鈕右側是 (221,204,187)）。
+    """
+    h, w = frame.shape[:2]
+    x += skip          # 緊鄰條尾的一兩個像素常是邊緣振鈴，實測 (194,194,230)
+    if x + n > w or not (0 <= y < h):
+        return False
+    px = frame[y, x:x + n].astype(int)
+    b, g, r = px[:, 0], px[:, 1], px[:, 2]
+    spread = _np.maximum(_np.maximum(abs(b - g), abs(g - r)), abs(b - r))
+    good = (spread <= tol) & (px.min(axis=1) >= v_min)
+    return bool(good.mean() >= need)     # 多數即可，容忍零星雜點
+
+
 def find_bar(frame, color="red", bottom_frac=0.88, min_frac=0.02):
     """在畫面下緣找 HP(red)/MP(blue) 條，回傳 dict(x, y, len) 或 None。
 
-    取最長的一段連續色塊——長條 UI 在畫面下方是最顯著的水平色帶。
+    優先選「右側接著中性灰空槽」的那一段；沒有符合的才退回最長段。
+
+    為什麼不能只取最長：實測 164 幀，血量 24% 時真血條長 49px，而底部 UI 的
+    購物商場紅色按鈕也剛好是 49px，掃描順序讓按鈕先贏。後果是 HP 讀值恆為
+    1.000（按鈕永遠「滿」），血量保護與 HP_LOST_LIMIT 從此不可能觸發——
+    整條安全鏈默默失效，而且每一幀都回報「找到血條」，看起來完全正常。
     """
     if not _CV_AVAILABLE or frame is None:
         return None
     h, w = frame.shape[:2]
     y0 = int(h * bottom_frac)
     m = _color_mask(frame[y0:], color)
+    lim = int(w * min_frac)
     best = (0, 0, 0)
+    troughed = (0, 0, 0)
     for y in range(m.shape[0]):
-        L, st = longest_run(m[y])
-        if L > best[0]:
-            best = (L, st, y)
-    L, st, y = best
-    if L < int(w * min_frac):
+        row = m[y].copy()
+        while True:
+            L, st = longest_run(row)
+            if L < max(1, lim):
+                break
+            if L > best[0]:
+                best = (L, st, y)
+            if L > troughed[0] and _neutral_after(frame, y0 + y, st + L):
+                troughed = (L, st, y)
+            row[st:st + L] = False
+    L, st, y = troughed if troughed[0] else best
+    if L < lim:
         return None
     return {"x": int(st), "y": int(y0 + y), "len": int(L)}
 
@@ -87,6 +120,13 @@ def find_minimap_rect(frame, quad_w=0.30, quad_h=0.35, max_area_frac=0.05):
         # 等深色視窗佔 20%+，用象限面積當基準會把小地圖本身也濾掉。
         if area > frame_area * max_area_frac:
             continue                       # 太大 → 是開啟的 UI 視窗，不是小地圖
+        # 外框也要有上限。上面看的是「連通區的像素數」，而玩家開啟的視窗只有
+        # 邊框是深色 → 像素數很少卻能撐出巨大的外框。實測回傳過 (0,0,820,558)
+        # ——整個左上象限，含使用者開著的勳章視窗。用那個 ROI 去找玩家點會鎖在
+        # 視窗裡的一個靜態圖示上，座標 164 幀完全不動，於是 _pos_miss 永遠不累加、
+        # 永遠不重新校準，platform_span 恆為 None → 45 秒後進 IDLE_SAFE 卡到天亮。
+        if bw * bh > frame_area * max_area_frac:
+            continue
         if not (bw > w * 0.02 and bh > h * 0.02):
             continue
         if not (0.3 < bw / max(1, bh) < 8):
