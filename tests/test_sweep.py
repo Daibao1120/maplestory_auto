@@ -233,113 +233,92 @@ def test_blind_sweep_stays_bounded_even_with_early_turnarounds():
         assert -4 <= hw._sweep_pos <= 4, f"第 {i} 步漂出收斂範圍：{hw._sweep_pos}"
 
 
-# ---- 看到怪才出手（使用者實跑回報：「會朝空氣攻擊」）----
+# ---- 打得到才持續輸出（使用者實跑回報：「會朝空氣攻擊」）----
+#
+# 實機量測否決了「先偵測怪、再決定打不打」：模板比對 8 隻只找到 2 隻、608ms；
+# 名牌定位 score 0.39 失效，角色實際位置比畫面中央低 236px，同層過濾整個算錯。
+# 改用傷害數字——打中了就跳數字，是打到東西的直接證據，繞開角色定位這個死結。
 
-def targeting(tg, **kw):
-    """做一台目標偵測被寫死成 tg=(左,右,左最近,右最近) 的掃蕩器。"""
+def dmg_sweeper(**kw):
     hw = sweeper(**kw)
     hw.target_check = True
-    hw._tgt_ready = True
-    hw._atk_range = 700.0
-    hw._init_targets = lambda: True
-    hw._scan_targets = lambda: tg
-    hw._tgt_seen = 0.0
+    hw._dmg_ready = True
+    hw._dmg_broken = False
     hw.attacks = []
     hw._attack_once = lambda: hw.attacks.append("atk")
     hw.steps = []
     hw._tap = lambda k, hold=None: hw.steps.append(k)
+    hw._next_attack = 0.0
     return hw
 
 
-def test_does_not_attack_when_nothing_is_in_front():
-    """前面空無一物就不可以出手——這正是使用者回報的空揮。"""
-    hw = targeting((0, 0, None, None))
-    hw._sweep_dir = 1
-    hw._sweep_by_target((0, 0, None, None), 100.0)
-    assert hw.attacks == [], "前面沒有怪卻還是攻擊了"
+def test_keeps_attacking_while_damage_is_landing():
+    hw = dmg_sweeper()
+    hw._last_dmg = 100.0
+    hw._sweep_by_damage(100.5)
+    assert hw.attacks == ["atk"]
+    assert hw.steps == [], "打得到卻走掉了"
+
+
+def test_stops_attacking_once_damage_stops():
+    """傷害停了就是打不到——這正是空揮的來源。"""
+    hw = dmg_sweeper()
+    hw._last_dmg = 100.0
+    hw._last_step = 1e9                       # 還不到走下一步的時間
+    hw._last_probe = 1e9                      # 也還不到試打的時間
+    hw._sweep_by_damage(100.0 + hw.HIT_MEMORY + 0.1)
+    assert hw.attacks == [], "沒打到東西還在開火"
     assert hw._air_skips == 1
 
 
-def test_attacks_when_a_monster_is_in_range_ahead():
-    hw = targeting((0, 1, None, 300.0))
-    hw._sweep_dir = 1                    # 往右走，怪在右邊 300px
-    hw._next_attack = 0.0
-    hw._sweep_by_target((0, 1, None, 300.0), 100.0)
-    assert hw.attacks == ["atk"]
-    assert hw.steps == [], "射程內有怪還走掉了"
+def test_probes_are_time_throttled_not_continuous():
+    """完全不打會有另一個問題：永遠不知道新位置打不打得到。
+    但試打必須有節流——每一刻都試等於一路開火，跟原本的空揮沒兩樣。"""
+    hw = dmg_sweeper()
+    hw._last_dmg = None
+    hw._last_step = 1e9
+    hw._last_probe = 0.0
+    t = 100.0
+    for i in range(30):                       # 3 秒內（節流是 2 秒）
+        hw._next_attack = 0.0
+        hw._sweep_by_damage(t)
+        t += 0.1
+    assert len(hw.attacks) <= hw.PROBE_SHOTS * 2, (
+        f"3 秒內試打了 {len(hw.attacks)} 下 → 節流沒生效")
+    assert hw.attacks, "完全不試打 → 永遠不知道打不打得到"
 
 
-def test_does_not_attack_a_monster_that_is_out_of_range():
-    """怪在同一側但遠超射程 → 打過去也是空的，應該先走過去。"""
-    hw = targeting((0, 1, None, 1200.0))
-    hw._sweep_dir = 1
-    hw._last_step = 0.0
-    hw._sweep_by_target((0, 1, None, 1200.0), 100.0)
-    assert hw.attacks == [], "對射程外的怪開火＝空揮"
-    assert hw.steps, "應該走過去接近"
-
-
-def test_turns_back_when_every_monster_is_behind():
-    hw = targeting((3, 0, 200.0, None))
-    hw._sweep_dir = 1                    # 往右走，怪全在左邊
-    hw._since_turn = 5
-    hw._sweep_by_target((3, 0, 200.0, None), 100.0)
-    assert hw._sweep_dir == -1
-    assert hw.attacks == []
-
-
-def test_hold_mode_releases_the_attack_key_when_the_target_is_gone():
-    """按住模式下不再呼叫 hold_tick 並不會讓鍵彈起來——必須主動放開，
-    否則會一路壓著 Ctrl 打空氣。"""
-    hw = targeting((0, 0, None, None), hold_attack=True)
+def test_hold_mode_releases_the_key_when_damage_stops():
+    """按住模式下不再呼叫 hold_tick 不會讓鍵彈起來，會一路壓著打空氣。"""
+    hw = dmg_sweeper(hold_attack=True)
     ups = []
     hw._up = lambda k: ups.append(k)
     hw._atk_held = True
-    hw._sweep_by_target((0, 0, None, None), 100.0)
-    assert hw.attack_key in ups, "沒有目標卻還壓著攻擊鍵"
+    hw._last_dmg = None
+    hw._last_step = 1e9
+    hw._last_probe = 1e9
+    hw._sweep_by_damage(100.0)
+    assert hw.attack_key in ups
     assert hw._atk_held is False
 
 
-def test_falls_back_to_plain_attacking_when_detection_is_blind():
-    """這張圖的怪沒有模板時，「看到才打」會變成完全不打。
-    寧可打空氣，也不要整晚不出手。"""
-    hw = sweeper()
-    hw.target_check = True
-    hw._tgt_ready = True
-    hw._init_targets = lambda: True
-    hw._scan_targets = lambda: (0, 0, None, None)
-    hw._tgt_seen = 0.0
-    assert hw._targets(10.0) is not None            # 還在寬限期內
-    assert hw._targets(10.0 + hw.TARGET_BLIND_GRACE + 1) is None  # 判定偵測不可靠
-    assert hw._tgt_blind is True
-
-
-def test_target_check_defaults_on_but_is_disabled_in_dry_run():
-    assert sweeper().target_check is False          # dry-run 不做視覺
-    hw = HoldWiggle(dry_run=True, target_check=False)
-    assert hw.target_check is False
-
-
 def test_standing_still_too_long_triggers_an_anti_stale_shuffle():
-    """定點輸出約 60 秒後攻擊會失效，而且失效看的是水平位移（原地跳沒用）。
-
-    「看到怪就站定打」的代價正是容易踩到這個，所以要主動安排小碎步。
-    """
-    hw = targeting((0, 1, None, 300.0))
-    hw._sweep_dir = 1
-    hw._next_attack = 0.0
-    hw._sweep_by_target((0, 1, None, 300.0), 100.0)         # 開始站定輸出
-    assert hw._stand_since == 100.0
+    """定點輸出約 60 秒後攻擊會失效，失效判定看的是水平位移（原地跳無效）。"""
+    hw = dmg_sweeper()
+    hw._last_dmg = 100.0
+    hw._sweep_by_damage(100.1)
+    assert hw._stand_since == 100.1
     hw.steps.clear()
-    t = 100.0 + hw.STAND_SHUFFLE_AFTER + 1
-    hw._sweep_by_target((0, 1, None, 300.0), t)
-    assert hw.steps, "站了 40 秒還沒動 → 攻擊會失效"
+    hw._last_dmg = 100.0 + hw.STAND_SHUFFLE_AFTER
+    hw._sweep_by_damage(100.1 + hw.STAND_SHUFFLE_AFTER + 0.1)
     assert set(hw.steps) == {"left", "right"}, "碎步要有來有回，淨位移接近 0"
 
 
-def test_moving_resets_the_anti_stale_timer():
-    hw = targeting((0, 0, None, None))
-    hw._sweep_dir = 1
-    hw._stand_since = 50.0
-    hw._sweep_by_target((0, 0, None, None), 100.0)          # 沒有目標 → 走
-    assert hw._stand_since is None
+def test_detection_failure_falls_back_to_plain_attacking():
+    """傷害偵測壞掉時必須退回照打，不可以變成永遠不出手。"""
+    hw = dmg_sweeper()
+    hw._init_damage = lambda: (_ for _ in ()).throw(RuntimeError("no cv2"))
+    hw._dmg_ready = False
+    hw._dmg_next = 0.0
+    hw._damage_tick(100.0)
+    assert hw._dmg_broken is True
