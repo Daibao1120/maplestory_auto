@@ -396,6 +396,10 @@ class HoldWiggle:
         self._dmg_count = 0
         self._probe_left = 0        # 還要試打幾下
         self._last_probe = 0.0
+        self._loc = None            # 角色定位（頭盔模板）
+        self._loc_miss = 0
+        self._loc_warned = False
+        self._hit_side = None       # 最近打到的東西在自己的哪一邊
         self._air_skips = 0         # 因為前面沒怪而略過的攻擊次數
         self._stand_since = None    # 站定輸出的起始時間（防定點失效用）
         self.meter = meter and not dry_run            # 戰績計：估打怪頻率，用來比較設定
@@ -928,6 +932,7 @@ class HoldWiggle:
     # 最近這麼久內有跳傷害 → 視為打得到。打得到時傷害每 ~0.3 秒就會跳，1.2 秒
     # 已經很寬鬆；而每多留 1 秒，怪死之後就多約 10 下空揮（attack_interval 0.10）。
     HIT_MEMORY = 1.2
+    LOC_MISS_LIMIT = 20         # 連續定位不到幾次就放棄歸屬、退回照打
     DMG_EVERY = 0.25            # 看畫面的節流
     # 打不到時仍要偶爾試打，否則永遠不知道新位置打不打得到。但不能每走一步就試，
     # 那在空曠區段等於一路開火。改用時間節流：每 PROBE_EVERY 秒試 PROBE_SHOTS 下。
@@ -947,7 +952,7 @@ class HoldWiggle:
             import cv2
             if ROOT not in sys.path:
                 sys.path.insert(0, ROOT)
-            from src.vision import DamageWatcher
+            from src.vision import DamageWatcher, PlayerLocator
             from src.capture import ScreenCapture
             self._cv2 = cv2
             if self._cap is None:
@@ -957,6 +962,12 @@ class HoldWiggle:
             self._canon = tuple((cfg.get("vision") or {}).get(
                 "canonical_size") or (1371, 808))
             self._dmgw = DamageWatcher()
+            self._loc = PlayerLocator(root=ROOT)
+            if not self._loc.available:
+                print("  （找不到頭盔模板 assets/templates/player/helmet_*.png"
+                      " → 無法分辨傷害是不是自己打的，改回照原節奏攻擊）")
+                self._dmg_broken = True
+                return False
         except Exception as e:
             print(f"  （傷害偵測初始化失敗：{e} → 改回照原節奏攻擊）")
             self._dmg_broken = True
@@ -981,10 +992,26 @@ class HoldWiggle:
             fr = raw
             if (raw.shape[1], raw.shape[0]) != self._canon:
                 fr = cv2.resize(raw, self._canon, interpolation=cv2.INTER_AREA)
-            hits = self._dmgw.update(fr)
-            if hits:
+            pos = self._loc.find(fr)
+            if pos is None:
+                self._loc_miss += 1
+                # 定位不到就無法歸屬傷害。長時間定位不到多半是換了裝備／換了
+                # 角色，這時「不確定＝不打」會變成幾乎完全不出手 → 退回照打。
+                if self._loc_miss >= self.LOC_MISS_LIMIT and not self._loc_warned:
+                    self._loc_warned = True
+                    print("  ⚠ 連續定位不到角色 → 傷害歸屬失效，改回照原節奏攻擊。"
+                          "換過帽子的話跑 tools/grab_helmet.py 重截一張模板")
+                    self._dmg_broken = True
+                return
+            self._loc_miss = 0
+            mine = self._dmgw.update(fr, now, pos)
+            if mine:
                 self._last_dmg = now
-                self._dmg_count += len(hits)
+                self._dmg_count += len(mine)
+                if self._dmgw.last_side:
+                    self._hit_side = self._dmgw.last_side
+            elif self._dmgw.last_taken == now:
+                self._last_dmg = now      # 正在被打＝怪就在身上，當然要還手
         except Exception as e:
             self._dmg_broken = True
             print(f"  （傷害偵測出錯：{e} → 改回照原節奏攻擊）")
@@ -1021,6 +1048,13 @@ class HoldWiggle:
         # 打不到 → 絕不繼續壓著攻擊鍵（按住模式不主動放開就會一路空揮）
         self._stand_since = None
         self._attack_release()
+        # 剛剛打到的東西在另一邊 → 先轉回去，不要把空趟走完
+        if (self._hit_side and self._since_turn >= self.DWELL_MIN_STEPS
+                and ((self._hit_side == "left") != (self._sweep_dir < 0))):
+            self._sweep_dir *= -1
+            self._since_turn = 0
+            self._hit_side = None
+            print(f"  ⇦ 剛才打到的在另一邊 → 轉回去")
         if now - self._last_step >= self.step_interval:
             self._sweep_step()
             self._last_step = now

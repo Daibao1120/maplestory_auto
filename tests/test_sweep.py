@@ -322,3 +322,33 @@ def test_detection_failure_falls_back_to_plain_attacking():
     hw._dmg_next = 0.0
     hw._damage_tick(100.0)
     assert hw._dmg_broken is True
+
+
+def test_losing_the_player_for_too_long_falls_back_to_plain_attacking():
+    """定位不到就無法歸屬傷害。換過帽子時「不確定＝不打」會變成幾乎不出手，
+    所以連續定位失敗夠多次要退回照打，並講清楚怎麼修。"""
+    hw = dmg_sweeper()
+    hw._init_damage = lambda: True
+    hw._cv2 = __import__("cv2")
+    hw._canon = (8, 8)
+    import numpy as np
+    blank = np.zeros((8, 8, 3), np.uint8)
+    hw._cap = type("C", (), {"grab": lambda self: blank})()
+    hw._loc = type("L", (), {"find": lambda self, f: None})()
+    hw._dmgw = type("W", (), {"update": lambda *a: []})()
+    for i in range(hw.LOC_MISS_LIMIT):
+        hw._dmg_next = 0.0
+        hw._damage_tick(100.0 + i)
+    assert hw._dmg_broken is True
+
+
+def test_turns_back_toward_the_side_it_last_hit():
+    hw = dmg_sweeper()
+    hw._last_dmg = None
+    hw._last_step = 1e9
+    hw._last_probe = 1e9
+    hw._hit_side = "left"
+    hw._sweep_dir = 1                      # 正往右走，但剛才打到的在左邊
+    hw._since_turn = 5
+    hw._sweep_by_damage(100.0)
+    assert hw._sweep_dir == -1

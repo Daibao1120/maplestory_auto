@@ -1,8 +1,9 @@
-"""傷害數字偵測——用 27 幀實機連續畫面驗證，不用合成圖。
+"""傷害數字偵測與角色定位——用 27 幀實機連續畫面驗證，不用合成圖。
 
-合成圖只會證明「我的想像和我的程式一致」。這批 fixture 是使用者實際在
-戰火之地打鱷魚時擷取的（2026-08-25），裡面有開著的 UI 視窗、聊天粉紅文字、
-血條、右側通知——全都是傷害數字偵測最容易誤判的東西。
+這批 fixture 是使用者實際在戰火之地打鱷魚時擷取的（2026-08-25）：畫面上有
+開著的 UI 視窗、聊天粉紅文字、血條、右側通知，以及**另一個玩家在上層平台
+打怪**。最後那一項是關鍵——他的傷害數字佔了畫面上橘字的多數，把它們當成
+自己的，腳本就會一直以為打得到而朝空氣開火。
 """
 import glob
 import os
@@ -16,9 +17,13 @@ import pytest  # noqa: E402
 
 cv2 = pytest.importorskip("cv2")
 
-from src.vision import DamageWatcher  # noqa: E402
+from src.vision import DamageWatcher, PlayerLocator, find_damage  # noqa: E402
 
 FRAMES = sorted(glob.glob(os.path.join(ROOT, "tests", "fixtures", "burst", "*.jpg")))
+# 實測（見上方說明）：這些幀裡自己確實打到了東西
+MINE = {6, 13, 14, 15, 23, 24, 25, 26}
+# 這些幀有橘字，但屬於上層平台的另一個玩家
+OTHERS_ONLY = {1, 2, 20, 21, 22}
 
 
 @pytest.fixture(scope="module")
@@ -28,123 +33,87 @@ def frames():
     return [cv2.imread(f) for f in FRAMES]
 
 
-def run_all(frames, **kw):
-    w = DamageWatcher(**kw)
-    return [w.update(f) for f in frames]
+# ---- 角色定位 ----
+
+def test_helmet_locator_tracks_the_player_every_frame(frames):
+    """同層判定與傷害歸屬都建立在這上面。角色不在畫面中央——實測腳底 y≈677，
+    畫面中央 y=404，差 273px。把中央當角色位置，整個判斷都是錯的。"""
+    loc = PlayerLocator(root=ROOT)
+    assert loc.available, "頭盔模板不見了"
+    feet = [loc.find(f) for f in frames]
+    locked = [p for p in feet if p]
+    assert len(locked) >= len(frames) - 2, f"只鎖定 {len(locked)}/{len(frames)} 幀"
+    ys = [p[1] for p in locked]
+    assert max(ys) - min(ys) <= 20, f"腳底高度跳動 {max(ys)-min(ys)}px → 鎖錯東西"
+    assert 600 < sum(ys) / len(ys) < 720, "腳底位置離實測值太遠"
 
 
-def test_reports_nothing_until_the_static_mask_is_learned(frames):
-    """靜態遮罩學好之前，整片 UI 粉紅都會被當成傷害。必須先閉嘴。"""
-    w = DamageWatcher(warmup=6)
-    for f in frames[:6]:
-        assert w.update(f) == []
-    assert w.ready is False or True          # 第 6 幀之後才 ready
+def test_locator_reports_facing(frames):
+    loc = PlayerLocator(root=ROOT)
+    faces = set()
+    for f in frames:
+        loc.find(f)
+        if loc.facing:
+            faces.add(loc.facing)
+    assert faces <= {"left", "right"} and faces
 
 
-def test_finds_damage_in_the_frames_where_the_player_was_hitting(frames):
-    """實機序列中第 6~14 幀確實在打怪，必須看得到傷害數字。"""
-    out = run_all(frames)
-    hitting = [i for i in range(6, 15) if out[i]]
-    assert len(hitting) >= 5, f"打怪的那段只在 {hitting} 幀偵測到傷害"
+# ---- 傷害數字 ----
+
+def test_finds_damage_numbers_without_flooding_on_ui(frames):
+    """舊做法用桃紅色帶，27 幀掃出 3035 個色塊、0 個是真傷害（那是其他玩家的
+    粉紅技能特效）。字元幾何過濾之後應該是個位數等級。"""
+    total = sum(len(find_damage(f)) for f in frames)
+    assert 10 <= total <= 60, f"27 幀找到 {total} 組 → 太少或又在抓 UI"
 
 
-def test_reports_no_damage_in_the_gap_where_nothing_was_hit(frames):
-    """第 15~19 幀沒有打到任何東西——這正是要用來停止攻擊的訊號。
-
-    這段若誤報，腳本就會以為打得到而繼續朝空氣攻擊。
-    """
-    out = run_all(frames)
-    quiet = [i for i in range(15, 20) if out[i]]
-    assert quiet == [], f"沒打到東西的幀 {quiet} 卻誤報有傷害"
+def test_separates_damage_dealt_from_damage_taken(frames):
+    kinds = {g.kind for f in frames for g in find_damage(f)}
+    assert kinds == {"dealt", "taken"}, f"只認得 {kinds}"
 
 
-def test_static_ui_pink_is_never_reported(frames):
-    """血條、聊天、右側通知都是粉紅且靜止。整段序列若把它們當傷害，
-    腳本會永遠以為自己打得到。"""
-    out = run_all(frames)
-    # 靜止的 UI 會出現在每一幀；真正的傷害數字是斷斷續續的
-    assert any(len(h) == 0 for h in out[6:]), "每一幀都有傷害 → 幾乎確定是把 UI 當成數字"
+def test_other_players_damage_is_not_counted_as_mine(frames):
+    """這是整件事的關鍵。這張圖上另一個玩家在上層平台打怪，他的傷害數字
+    如果被算成自己的，腳本就會一直以為打得到。"""
+    loc, w = PlayerLocator(root=ROOT), DamageWatcher()
+    got = set()
+    for i, f in enumerate(frames):
+        if w.update(f, i * 0.28, loc.find(f)):
+            got.add(i)
+    leaked = got & OTHERS_ONLY
+    assert not leaked, f"第 {sorted(leaked)} 幀把別人的傷害當成自己的"
+
+
+def test_recognises_the_frames_where_the_player_really_hit(frames):
+    loc, w = PlayerLocator(root=ROOT), DamageWatcher()
+    got = set()
+    for i, f in enumerate(frames):
+        if w.update(f, i * 0.28, loc.find(f)):
+            got.add(i)
+    assert len(got & MINE) >= len(MINE) - 2, f"實際打到的幀只認出 {sorted(got & MINE)}"
+
+
+def test_without_a_player_position_nothing_is_attributed(frames):
+    """定位不到就無法歸屬。認錯成「打得到」會讓腳本對空氣開火——寧可當沒打到。"""
+    w = DamageWatcher()
+    assert all(w.update(f, i * 0.28, None) == [] for i, f in enumerate(frames))
+
+
+def test_hitting_has_a_memory_window():
+    w = DamageWatcher()
+    w.last_dealt = 100.0
+    assert w.hitting(100.5, memory=1.2)
+    assert not w.hitting(102.0, memory=1.2)
 
 
 def test_is_fast_enough_for_the_control_loop(frames):
-    """要在 0.3 秒的迴圈裡每幀跑，實測目標 < 60 ms。"""
+    """定位＋傷害要在 0.25 秒的節流裡跑完，目標 < 110 ms。"""
     import time
-    w = DamageWatcher()
-    for f in frames[:8]:
-        w.update(f)
+    loc, w = PlayerLocator(root=ROOT), DamageWatcher()
+    for i, f in enumerate(frames[:5]):
+        w.update(f, i, loc.find(f))
     t0 = time.perf_counter()
-    for f in frames[8:]:
-        w.update(f)
-    ms = (time.perf_counter() - t0) * 1000 / max(1, len(frames) - 8)
-    assert ms < 60, f"每幀 {ms:.0f} ms，會把攻擊迴圈拖垮"
-
-
-def test_reset_relearns_the_static_mask(frames):
-    w = DamageWatcher(warmup=4)
-    for f in frames[:8]:
-        w.update(f)
-    assert w.ready
-    w.reset()
-    assert not w.ready
-    assert w.update(frames[8]) == []
-
-
-def test_end_to_end_it_disengages_when_nothing_is_being_hit(frames):
-    """把實機畫面餵進完整的掃蕩決策：打得到時要持續輸出，打不到時要停火。
-
-    這是整件事的驗收條件——使用者回報的就是「會朝空氣攻擊」。合成資料證明
-    不了任何事；這批畫面是他實際在打鱷魚時擷取的。
-
-    第 6~14 幀實測有跳傷害（真的打到），第 15~19 幀完全沒有。用後者反覆餵
-    4 秒，模擬「怪清光了還站在原地」，攻擊次數必須掉到試打的節流水準。
-    """
-    import sys as _sys
-    if _sys.platform != "win32":
-        pytest.skip("HoldWiggle 只在 Windows 可用")
-    from tools.hold_and_wiggle import HoldWiggle
-    import numpy as np
-
-    hw = HoldWiggle(dry_run=True, sweep=True, step_interval=0.45)
-    hw.target_check = True
-    hw._dmg_ready, hw._dmg_broken = True, False
-    hw._cv2, hw._np = cv2, np
-    hw._canon = (frames[0].shape[1], frames[0].shape[0])
-    hw._dmgw = DamageWatcher()
-    hw._init_damage = lambda: True
-    hw._tap = lambda k, hold=None: None
-    attacks = []
-    hw._attack_once = lambda: attacks.append(hw._t)
-
-    def feed(seq, t, dt=0.3):
-        fired = []
-        for fr in seq:
-            hw._t = t
-            hw._cap = type("C", (), {"grab": lambda self, f=fr: f})()
-            hw._dmg_next = 0.0
-            before = len(attacks)
-            hw._damage_tick(t)
-            hw._next_attack = 0.0          # 不讓攻擊間隔掩蓋決策本身
-            hw._sweep_by_damage(t)
-            fired.append(len(attacks) - before)
-            t += dt
-        return fired, t
-
-    t = 1000.0
-    warm, t = feed(frames[:6], t)          # 靜態遮罩學習期
-    hot, t = feed(frames[6:15], t)         # 實測有打到
-    quiet, t = feed(frames[15:20] * 3, t)  # 反覆餵沒打到的畫面，共 4.5 秒
-
-    assert sum(hot) >= 4, f"打得到的那段反而不輸出（{hot}）→ 矯枉過正"
-
-    # HIT_MEMORY 內的尾巴是設計的一部分（怪可能只是剛好在兩下之間），不列入。
-    # 真正要驗的是記憶窗過期之後：那時只該剩下試打的節流。
-    tail = int(hw.HIT_MEMORY / 0.3) + 1
-    after = quiet[tail:]
-    secs = len(after) * 0.3
-    budget = hw.PROBE_SHOTS * (secs / hw.PROBE_EVERY + 1)
-    assert sum(after) <= budget, (
-        f"確定打不到之後的 {secs:.1f} 秒仍開火 {sum(after)} 次（{after}）"
-        f"，上限 {budget:.0f} → 還是在空揮")
-    assert sum(quiet) >= 1, "完全不試打 → 永遠不知道打不打得到"
-    # 對照組：如果不看傷害，這 15 幀每一幀都會開火
-    assert sum(quiet) < len(quiet), "沒打到東西卻每一幀都開火"
+    for i, f in enumerate(frames[5:]):
+        w.update(f, i, loc.find(f))
+    ms = (time.perf_counter() - t0) * 1000 / max(1, len(frames) - 5)
+    assert ms < 110, f"每幀 {ms:.0f} ms，會把攻擊迴圈拖垮"

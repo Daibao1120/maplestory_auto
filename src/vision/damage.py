@@ -1,16 +1,22 @@
-"""傷害數字偵測——「有沒有真的打到東西」的直接證據。
+"""傷害數字偵測——「這一下有沒有打到東西」的直接證據。
 
-為什麼不是偵測怪物：實機量測（27 幀連續畫面）顯示模板比對在這張地圖上
-只找得到約 8 隻鱷魚中的 2 隻，加上鏡像模板變成 4 隻，代價是 1274 ms/幀。
-對一個 0.3 秒的迴圈完全不可用，而且漏掉的那一半正好造成「明明有怪卻不打」
-或「沒有怪卻照打」。
+規格全部來自實機量測（2026-08-25 戰火之地，27 幀連續畫面 + 獨立驗證幀）：
+橘色數字＝打出去的傷害，紫色數字＝自己受到的傷害。加上字元形狀過濾後
+21/22 命中、0 誤判。
 
-傷害數字反過來直接回答問題：打中了就會跳數字，沒打中就不會。實測整張
-正規化畫面 35 ms/幀，而且不需要任何模板——換地圖、換怪都能用。
+被實測否決的做法（別再走回頭路）：
+  - 桃紅色帶 H[160,180]∪[0,5]、S>150、V>180：3035 個色塊裡 0 個是真傷害。
+    那個色帶抓到的其實是「其他玩家的粉紅技能特效」，是最大的雜訊來源。
+  - 只靠「時間穩定性」分辨 UI：其他玩家的特效同樣是瞬時的，分不開。
+  - 聊天框粉紅字 H164-166 就緊貼在紫色帶邊上，所以紫色上限不可越過 163。
 
-分辨傷害數字與 UI 粉紅（血條、聊天、右側通知）的關鍵是**時間穩定性**：
-傷害數字會浮起後消失，UI 是靜止的。在最近幾幀大多時間都是桃紅的像素判定
-為 UI，扣掉之後剩下的就是傷害數字。
+真正把雜訊殺掉的是**字元幾何**：傷害數字是一排 2~4 個等高的數字。
+量測到的雜訊與對應的過濾條件：
+  靜態 UI 圖示（27/27 幀都在）→ 每組至少 2 個字元
+  路過玩家的黃帽（w31-35 h18-19）→ 字元高度下限 22
+  樹皮（H15-22、V 中位數 145）→ V>=160 且字元高度上限 40
+  隊伍血條紅（h16）→ 字元高度下限 22
+  其他玩家的技能特效（單塊面積上到 1075）→ 整組高度下限 24
 """
 
 try:
@@ -23,80 +29,159 @@ except Exception:                                    # pragma: no cover
     _CV_AVAILABLE = False
 
 
-class DamageWatcher:
-    """看畫面上有沒有跳傷害數字。
+# 以下像素門檻都是「基準尺度 1371x808」的數字。跑在原始 2736 要全部乘二；
+# 不可以跑在更小的尺度——字元會掉到 11~15px 高，和聊天字（上限 20px）就分不開了。
+ORANGE_LO, ORANGE_HI = (0, 150, 160), (32, 255, 255)      # 打出去的傷害
+VIOLET_LO, VIOLET_HI = (126, 140, 160), (163, 255, 255)   # 自己受到的傷害
+GLYPH_MIN_AREA = 110
+GLYPH_H = (22, 40)
+GLYPH_W = (8, 34)
+GLYPH_FILL = 0.35
+GROUP_GAP_X, GROUP_GAP_Y = 12, 8
+GROUP_MIN_GLYPHS = 2
+GROUP_H = (24, 46)
+GROUP_W = (26, 170)
 
-    參數（皆由實機 27 幀量測定出）：
-        h_lo/h_hi   桃紅色相帶（環繞 0）。實測傷害數字 H 中位數 166、S 218、V 237。
-        s_min/v_min 高飽和且亮——遊戲背景的粉紅花草達不到。
-        decay       靜態遮罩的學習速度（幀）。越大越慢適應，但越不會把
-                    停留較久的數字誤認成 UI。
-        static_frac 最近這麼高比例的時間都是桃紅 → 判定為 UI。
-        min_area    夠大的色塊才算數字（濾掉零星像素）。基準尺度像素。
-        warmup      靜態遮罩學好之前不回報——否則第一幀整片 UI 都會被當成傷害。
-    """
 
-    def __init__(self, h_lo=158, h_hi=6, s_min=150, v_min=180,
-                 decay=8, static_frac=0.6, min_area=130, warmup=6,
-                 side_margin=0.10, top_frac=0.06, bottom_frac=0.88):
-        self.h_lo, self.h_hi = h_lo, h_hi
-        self.s_min, self.v_min = s_min, v_min
-        self.decay = max(1, int(decay))
-        self.static_frac = float(static_frac)
-        self.min_area = int(min_area)
-        self.warmup = int(warmup)
-        # 只看遊戲畫面區：上方任務列、下方 UI 列、左右邊緣的通知文字都是粉紅重災區
-        self.side_margin = float(side_margin)
-        self.top_frac = float(top_frac)
-        self.bottom_frac = float(bottom_frac)
-        self._acc = None
-        self._seen = 0
+class DamageGroup:
+    """畫面上的一組傷害數字。"""
+
+    __slots__ = ("x", "y", "w", "h", "glyphs", "kind")
+
+    def __init__(self, x, y, w, h, glyphs, kind):
+        self.x, self.y, self.w, self.h = x, y, w, h
+        self.glyphs, self.kind = glyphs, kind
 
     @property
-    def ready(self):
-        """靜態遮罩學好了沒。沒學好前一律回報「沒有傷害」而不是亂報。"""
-        return self._seen >= self.warmup
+    def center(self):
+        return (self.x + self.w // 2, self.y + self.h // 2)
 
-    def _pink(self, frame):
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-        return (((h >= self.h_lo) | (h <= self.h_hi))
-                & (s > self.s_min) & (v > self.v_min)).astype(np.uint8)
+    @property
+    def bottom(self):
+        return self.y + self.h
 
-    def update(self, frame):
-        """吃一幀，回傳這一幀的傷害數字色塊 [(cx, cy, w, h, area), ...]。
+    def __repr__(self):                              # pragma: no cover
+        return f"<{self.kind} {self.glyphs}字 @{self.center} {self.w}x{self.h}>"
 
-        必須每幀都呼叫（含沒在攻擊的時候），靜態遮罩才學得準。
+
+def _glyphs(mask):
+    n, _lab, st, _cen = cv2.connectedComponentsWithStats(mask, 8)
+    out = []
+    for k in range(1, n):
+        x, y, w, h, a = st[k]
+        if a < GLYPH_MIN_AREA:
+            continue
+        if not (GLYPH_H[0] <= h <= GLYPH_H[1]):
+            continue
+        if not (GLYPH_W[0] <= w <= GLYPH_W[1]):
+            continue
+        if a / float(max(1, w * h)) < GLYPH_FILL:
+            continue
+        out.append([int(x), int(y), int(w), int(h)])
+    return out
+
+
+def _group(glyphs, kind):
+    """把靠在一起的字元併成一個數字。傷害是一排數字，單一色塊多半是雜訊。"""
+    boxes = [g[:] + [1] for g in glyphs]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(boxes)):
+            if boxes[i] is None:
+                continue
+            for j in range(i + 1, len(boxes)):
+                if boxes[j] is None:
+                    continue
+                ax, ay, aw, ah, an = boxes[i]
+                bx, by, bw, bh, bn = boxes[j]
+                gap_x = max(bx - (ax + aw), ax - (bx + bw))
+                gap_y = max(by - (ay + ah), ay - (by + bh))
+                if gap_x <= GROUP_GAP_X and gap_y <= GROUP_GAP_Y:
+                    nx, ny = min(ax, bx), min(ay, by)
+                    boxes[i] = [nx, ny,
+                                max(ax + aw, bx + bw) - nx,
+                                max(ay + ah, by + bh) - ny, an + bn]
+                    boxes[j] = None
+                    merged = True
+    out = []
+    for b in boxes:
+        if b is None:
+            continue
+        x, y, w, h, n = b
+        if n < GROUP_MIN_GLYPHS:
+            continue
+        if not (GROUP_H[0] <= h <= GROUP_H[1]):
+            continue
+        if not (GROUP_W[0] <= w <= GROUP_W[1]):
+            continue
+        out.append(DamageGroup(x, y, w, h, n, kind))
+    return out
+
+
+def find_damage(frame):
+    """在**基準尺度**畫面上找傷害數字，回傳 [DamageGroup, ...]。
+
+    kind = "dealt"（橘，打出去的）或 "taken"（紫，自己被打的）。
+    """
+    if not _CV_AVAILABLE or frame is None:
+        return []
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    out = []
+    for lo, hi, kind in ((ORANGE_LO, ORANGE_HI, "dealt"),
+                         (VIOLET_LO, VIOLET_HI, "taken")):
+        m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+        out.extend(_group(_glyphs(m), kind))
+    return out
+
+
+class DamageWatcher:
+    """追蹤「最近有沒有打到東西」，並把別人的傷害數字排除掉。
+
+    同一張圖上常有其他玩家在打怪：實測這張圖 59% 的橘色數字屬於站在上層平台
+    的其他玩家。單看「畫面上有沒有橘字」會一直誤判成自己打得到。所以要用
+    角色的腳底高度做歸屬——自己打出的傷害會出現在自己所在的那一層。
+    """
+
+    # 自己打出的傷害，數字底部相對**角色腳底**的高度範圍（基準 px）。
+    #
+    # 實機量測（27 幀）：角色腳底 y 675~678，自己打出的傷害數字底部落在
+    # 612~635，也就是腳底上方 40~66px——數字畫在角色胸口高度，而且每幀還會
+    # 往上飄約 17px。取 (-80, +20) 留足餘裕。
+    # 別層的傷害（其他玩家在上層平台打怪）底部在 y 324~396，也就是腳底上方
+    # 280~350px，被這個窗擋在外面還有兩百多像素的距離。
+    OWN_BAND = (-80, 20)
+
+    def __init__(self, own_band=None):
+        self.own_band = tuple(own_band or self.OWN_BAND)
+        self.last_dealt = None      # 最近一次「自己打到」的時間
+        self.last_taken = None      # 最近一次「自己被打」的時間
+        self.dealt_count = 0
+        self.last_side = None       # 最近一次打到的東西在自己的左邊還右邊
+
+    def update(self, frame, now, player=None):
+        """吃一幀（基準尺度）＋角色中心座標，回傳這一幀屬於自己的傷害組。
+
+        player 為 None 時無法歸屬——這時**不採信任何傷害**，寧可當作沒打到。
+        認錯成「打得到」會讓腳本對著空氣一直開火，那正是要修的問題。
         """
-        if not _CV_AVAILABLE or frame is None:
+        groups = find_damage(frame)
+        if player is None:
             return []
-        m = self._pink(frame)
-        if self._acc is None:
-            self._acc = m.astype(np.float32)
-        static = self._acc >= self.static_frac
-        hits = []
-        if self.ready:
-            trans = ((m == 1) & ~static).astype(np.uint8)
-            fh, fw = trans.shape[:2]
-            x0, x1 = int(fw * self.side_margin), int(fw * (1 - self.side_margin))
-            y0, y1 = int(fh * self.top_frac), int(fh * self.bottom_frac)
-            mask = np.zeros_like(trans)
-            mask[y0:y1, x0:x1] = 1
-            trans = trans * mask
-            # 數字是橫向連在一起的字元 → 用扁的核把同一組數字接成一塊
-            trans = cv2.morphologyEx(trans, cv2.MORPH_CLOSE,
-                                     np.ones((3, 9), np.uint8))
-            n, _lab, st, _cen = cv2.connectedComponentsWithStats(trans, 8)
-            for k in range(1, n):
-                x, y, w, h, a = st[k]
-                if a >= self.min_area:
-                    hits.append((int(x + w // 2), int(y + h // 2),
-                                 int(w), int(h), int(a)))
-        self._acc = self._acc * (1 - 1.0 / self.decay) + m * (1.0 / self.decay)
-        self._seen += 1
-        return hits
+        px, py = player
+        lo, hi = self.own_band
+        mine = [g for g in groups
+                if g.kind == "dealt" and lo <= (g.bottom - py) <= hi]
+        # py 是腳底 y；OWN_BAND 就是相對腳底量的（見常數註解）
+        if mine:
+            self.last_dealt = now
+            self.dealt_count += len(mine)
+            cx = sum(g.center[0] for g in mine) / len(mine)
+            self.last_side = "left" if cx < px else "right"
+        if any(g.kind == "taken" for g in groups):
+            self.last_taken = now
+        return mine
 
-    def reset(self):
-        """換地圖／視窗大小變了 → 重新學靜態遮罩。"""
-        self._acc = None
-        self._seen = 0
+    def hitting(self, now, memory=1.2):
+        """最近 memory 秒內有打到東西嗎。"""
+        return self.last_dealt is not None and now - self.last_dealt <= memory
