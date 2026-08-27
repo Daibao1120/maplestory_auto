@@ -44,6 +44,7 @@ def main(argv=None):
                             MinimapLocator, PlayerTracker, find_bars_pair,
                             exp_text_roi_from_bars, region_changed)
     from src.vision.modal import ModalWatcher
+    from src.vision.ui_calibrate import _neutral_after
 
     with open(os.path.join(ROOT, "config", "settings.yaml"), encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -51,6 +52,11 @@ def main(argv=None):
     cap = ScreenCapture(backend="mss", window_title=cfg["window"]["title"])
     if cap.grab() is None:
         print("[錯誤] 抓不到畫面。遊戲開著嗎？")
+        return 1
+    if cap.window_found is False:
+        print(f"[錯誤] 找不到標題含「{cfg['window']['title']}」的遊戲視窗，"
+              f"現在抓的是整個桌面——底下每一項都會是紅的，但那是因為讀在桌面上，"
+              f"不是偵測壞掉。請先開好遊戲再跑。")
         return 1
 
     loc = PlayerLocator(root=ROOT)
@@ -73,6 +79,14 @@ def main(argv=None):
     gate = Counter()
     last_dealt = [None]
 
+    # 「找到了」不等於「找對了」。血條讀錯時本工具照樣回報 100%——因為它抓到的
+    # 是底部 UI 的購物商場紅色按鈕，每一幀都找得到。所以下面同時記錄「位置有沒有
+    # 在幀之間漂移」與「讀值有沒有變動」：靜態 UI 的長度永遠不變，真血條會動。
+    hp_xs = Counter()
+    hp_lens = set()
+    hp_trough = [0, 0]      # [右側是灰槽的次數, 總次數]
+    hp_full = [0, 0]        # [條接近滿的次數, 總次數]
+    exp_xs = Counter()
     ok = Counter()
     n = 0
     ms = []
@@ -117,9 +131,18 @@ def main(argv=None):
 
         # UI 校準與 EXP 進帳
         hp, mp = find_bars_pair(raw)
+        er = exp_text_roi_from_bars(raw, hp, mp) if hp else None
         ok["HP 條"] += hp is not None
         ok["MP 條"] += mp is not None
-        er = exp_text_roi_from_bars(raw, hp, mp) if hp else None
+        if hp:
+            hp_xs[hp["x"]] += 1
+            hp_lens.add(hp["len"])
+            hp_trough[1] += 1
+            hp_trough[0] += _neutral_after(raw, hp["y"], hp["x"] + hp["len"])
+            hp_full[1] += 1
+            hp_full[0] += hp["len"] >= max(hp_lens) * 0.97
+        if er:
+            exp_xs[int(er[0])] += 1
         ok["EXP 區"] += er is not None
         if er:
             x, y, w, h = (int(v) for v in er)
@@ -161,7 +184,42 @@ def main(argv=None):
         print(f"  [{v}] {name:10s} {r:5.0%}" + ("" if v == "綠" else f"   ← {hint}"))
     fp = ok["彈窗誤報"] / n
     print(f"  [{'綠' if fp < 0.05 else '紅'}] {'彈窗誤報':10s} {fp:5.0%}"
-          + ("" if fp < 0.05 else "   ← 把 UI 當成測謊彈窗，會整夜停手"))
+          + ("" if fp < 0.05 else "   ← 把 UI 當成測謊彈窗，會整夜停手")
+          + ("   ← 註：0% 也可能代表它根本不會觸發（實測目前真陽性也是 0），"
+             "測謊防護實際上靠的是 EXP 停滯偵測" if fp < 0.001 else ""))
+
+    # ---- 找對了沒（不是找到了沒）----
+    print()
+    print("  === 讀值健全性（「找到」不等於「找對」）===")
+    if hp_xs:
+        drift = max(hp_xs) - min(hp_xs)
+        # 判別依據是「條的右側是不是中性灰的空槽」，不是「長度有沒有變」——
+        # 血量沒掉時長度本來就不會變，用那個當條件會一直誤報。
+        trough = hp_trough[0] / max(1, hp_trough[1])
+        # 血量滿的時候條被填滿，右側本來就沒有空槽可看——而滿血時「取最長」
+        # 本來就會選對，出問題的只有血量低到跟 UI 按鈕等長的時候。
+        full = hp_full[0] / max(1, hp_full[1])
+        v = "綠" if (drift <= 4 and (trough > 0.8 or full > 0.8)) else "紅"
+        print(f"  [{v}] 血條位置 x={min(hp_xs)}"
+              + (f"~{max(hp_xs)}" if drift else "")
+              + f"；長度 {min(hp_lens)}~{max(hp_lens)}"
+              + f"；右側是灰色空槽 {trough:.0%}")
+        if full > 0.8:
+            print("       （這段時間血量接近滿，條被填滿故無空槽可驗；"
+                  "血量低於約 25% 時才會出現與 UI 按鈕等長的風險）")
+        if trough <= 0.8 and full <= 0.8:
+            print("       ← 右側不是灰色空槽 → 抓到的多半是同色的 UI 按鈕。"
+                  "實測曾抓到購物商場按鈕（跟血條同樣 49px），HP 讀值恆為 1.000，"
+                  "血量保護從此不可能觸發")
+        if drift > 4:
+            print(f"       ← 位置在幀之間漂移 {drift}px → 不是同一個東西")
+        if len(hp_lens) == 1:
+            print("       （長度整段沒變＝這段時間血量沒掉，正常）")
+    if exp_xs:
+        d = max(exp_xs) - min(exp_xs)
+        print(f"  [{'綠' if d <= 20 else '紅'}] EXP 區 x={min(exp_xs)}"
+              + (f"~{max(exp_xs)}" if d else "")
+              + ("" if d <= 20 else "   ← 漂移太大，可能推到隊伍視窗上"))
 
     print()
     if feet:

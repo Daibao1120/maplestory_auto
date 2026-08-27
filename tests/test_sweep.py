@@ -428,3 +428,19 @@ def test_repeated_grab_failures_disable_the_gate():
         hw._dmg_next = 0.0
         hw._damage_tick(100.0 + i)
     assert hw._dmg_broken is True
+
+
+def test_exp_progress_also_opens_the_gate():
+    """傷害數字只在畫面停留約 0.4 秒，取樣一定會漏。EXP 進帳是擊殺的直接證據，
+    實測把它一起當證據後，漏掉的真實擊殺從 58% 降到 0%。"""
+    import numpy as np
+    hw = gated()
+    hw._gate_t0 = 0.0
+    hw._last_dmg = None
+    assert hw._target_gate(100.0)[0] is False       # 沒有任何證據 → 關
+    hw._exp_roi = (0, 0, 4, 4)
+    hw._exp_recalib = 99
+    hw._exp_prev = np.zeros((4, 4, 3), np.int16)
+    hw._exp_tick(np.full((8, 8, 3), 200, np.uint8))  # EXP 區變了
+    assert hw._exp_hits == 1
+    assert hw._last_dmg is not None

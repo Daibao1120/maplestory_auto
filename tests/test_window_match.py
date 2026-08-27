@@ -53,3 +53,21 @@ def test_accepts_unknown_exe_with_reasonable_size():
     # 執行檔名不在黑名單、尺寸像遊戲 → 放行（避免過度嚴格找不到視窗）
     assert is_game_window("新楓之谷：經典版", "unknown.exe", "Foo", KW,
                           1600, 900) is True
+
+
+def test_capture_layer_uses_the_same_guard():
+    """擷取層原本只比對標題就採用第一個命中的視窗，實測會抓到標題含
+    「新楓之谷」的 Chrome 分頁——於是血條、小地圖、角色全部讀在瀏覽器的
+    像素上，所有偵測同時變紅，而錯誤訊息只說「找不到玩家點」。"""
+    import inspect
+
+    from src.capture.screen_capture import ScreenCapture
+    src = inspect.getsource(ScreenCapture.locate_window)
+    assert "is_game_window(" in src, "擷取層沒有排除瀏覽器等同名視窗"
+
+
+def test_guard_lives_in_one_place():
+    """兩份實作會漂走。實測就是因為只有啟動器有防護、擷取層沒有。"""
+    from src.capture.window import is_game_window as shared
+    from tools.hold_and_wiggle import is_game_window as used
+    assert used is shared

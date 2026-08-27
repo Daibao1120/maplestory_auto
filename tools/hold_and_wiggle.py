@@ -219,57 +219,11 @@ def _right_click_at(sx: int, sy: int) -> None:
 # ============================================================
 # 標題比對會誤中瀏覽器分頁（Chrome 開著遊戲官網登入頁時，分頁標題就叫
 # 「新楓之谷：經典版」）——對瀏覽器送鍵是危險的誤操作，一律排除。
-_NON_GAME_EXES = {
-    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe",
-    "iexplore.exe", "explorer.exe", "code.exe", "windowsterminal.exe",
-    "powershell.exe", "cmd.exe", "conhost.exe", "notepad.exe", "python.exe",
-    "pythonw.exe", "claude.exe", "discord.exe", "linefortab.exe", "line.exe",
-}
-
-
-def _window_exe(hwnd) -> str:
-    """回傳視窗所屬行程的執行檔名（小寫）；失敗回空字串。"""
-    pid = wt.DWORD()
-    _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    if not pid.value:
-        return ""
-    k32 = ctypes.windll.kernel32
-    h = k32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not h:
-        return ""
-    try:
-        buf = ctypes.create_unicode_buffer(520)
-        size = ctypes.c_ulong(520)
-        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
-            return os.path.basename(buf.value).lower()
-    finally:
-        k32.CloseHandle(h)
-    return ""
-
-
-def _window_class(hwnd) -> str:
-    buf = ctypes.create_unicode_buffer(256)
-    _user32.GetClassNameW(hwnd, buf, 256)
-    return buf.value
-
-
-def is_game_window(title: str, exe: str, cls: str, keyword: str,
-                   width: int = 0, height: int = 0) -> bool:
-    """判斷這個視窗是不是「真的遊戲視窗」（純函式，可測試）。
-
-    規則：標題要含關鍵字；執行檔不得是瀏覽器/終端機等（否則就是誤中分頁
-    標題）；視窗尺寸要像遊戲畫面（避免抓到小型工具視窗）。
-    遊戲本體的 window class 通常是 MapleStoryClass，命中即直接採用。
-    """
-    if keyword and keyword not in (title or ""):
-        return False
-    if cls and "maplestory" in cls.lower():
-        return True
-    if (exe or "") in _NON_GAME_EXES:
-        return False
-    if width and height and (width < 640 or height < 480):
-        return False
-    return True
+# 「哪個視窗才是遊戲」的判斷已抽到 src/capture/window，擷取層共用同一份——
+# 擷取層原本沒有這道防護，實測會抓到標題含「新楓之谷」的 Chrome 分頁，
+# 於是所有偵測都讀在瀏覽器的像素上。
+from src.capture.window import NON_GAME_EXES as _NON_GAME_EXES  # noqa: E402,F401
+from src.capture.window import is_game_window  # noqa: E402
 
 
 def _find_window(keyword: str):
@@ -405,6 +359,10 @@ class HoldWiggle:
         self._gate_open = False
         self._gate_blind_since = None
         self._gate_blind_warned = False
+        self._exp_roi = None        # EXP 數字區（自動定位）
+        self._exp_prev = None
+        self._exp_recalib = 0
+        self._exp_hits = 0
         self._air_skips = 0         # 因為前面沒怪而略過的攻擊次數
         self._stand_since = None    # 站定輸出的起始時間（防定點失效用）
         self.meter = meter and not dry_run            # 戰績計：估打怪頻率，用來比較設定
@@ -936,7 +894,15 @@ class HoldWiggle:
     # 不需要模板，也不需要知道角色在畫面哪裡（那個死結就此繞開）。
     # 最近這麼久內有跳傷害 → 視為打得到。打得到時傷害每 ~0.3 秒就會跳，1.2 秒
     # 已經很寬鬆；而每多留 1 秒，怪死之後就多約 10 下空揮（attack_interval 0.10）。
-    HIT_MEMORY = 1.2
+    # 最近這麼久內有「打到的證據」→ 視為打得到。
+    #
+    # 證據有兩種：自己打出的傷害數字，以及 EXP 有進帳。實測 164 幀（使用者實際
+    # 遊玩）：只看傷害數字時，記憶窗 1.2 秒會漏掉 58% 的真實擊殺，拉到 6 秒仍漏
+    # 24% 而閘已經開著 82% 形同虛設——因為傷害數字只在畫面停留約 0.4 秒，取樣
+    # 一定會錯過大量。把 EXP 進帳一起當證據後，記憶窗 2 秒就能做到**漏掉 0 次
+    # 擊殺**，同時在真的沒東西時仍會關閘。
+    # 擋掉真實擊殺比空揮更糟：實測這個角色攻擊不耗魔，少打一下純粹是損失。
+    HIT_MEMORY = 2.0
     LOC_MISS_LIMIT = 20         # 連續定位不到幾次就放棄歸屬、退回照打
     GRAB_FAIL_LIMIT = 12        # 連續抓不到畫面幾次就放棄，退回照打
     GATE_WARMUP = 8.0           # 開跑後這麼久內一律放行——證據還來不及建立
@@ -1046,6 +1012,8 @@ class HoldWiggle:
             fr = raw
             if (raw.shape[1], raw.shape[0]) != self._canon:
                 fr = cv2.resize(raw, self._canon, interpolation=cv2.INTER_AREA)
+            # EXP 進帳＝擊殺的直接證據，比傷害數字可靠（數字只停留 0.4 秒）
+            self._exp_tick(raw)
             pos = self._loc.find(fr)
             if pos is None:
                 self._loc_miss += 1
@@ -1058,7 +1026,7 @@ class HoldWiggle:
                     self._dmg_broken = True
                 return
             self._loc_miss = 0
-            mine = self._dmgw.update(fr, now, pos)
+            mine = self._dmgw.update(fr, now, pos, stale=bool(self._loc.stale))
             if mine:
                 self._last_dmg = now
                 self._dmg_count += len(mine)
@@ -1071,6 +1039,29 @@ class HoldWiggle:
         except Exception as e:
             self._dmg_broken = True
             print(f"  （傷害偵測出錯：{e} → 改回照原節奏攻擊）")
+
+    def _exp_tick(self, raw):
+        """看 EXP 數字區有沒有變。有變＝剛剛殺掉東西 → 當作打得到的證據。"""
+        try:
+            from src.vision import (exp_text_roi_from_bars, find_bars_pair,
+                                    region_changed)
+            if self._exp_roi is None or self._exp_recalib <= 0:
+                hp, mp = find_bars_pair(raw)
+                r = exp_text_roi_from_bars(raw, hp, mp) if hp else None
+                if r:
+                    self._exp_roi = tuple(int(v) for v in r)
+                self._exp_recalib = 40          # 每 40 次才重新定位一次
+            self._exp_recalib -= 1
+            if self._exp_roi is None:
+                return
+            x, y, w, h = self._exp_roi
+            crop = raw[y:y + h, x:x + w].astype("int16")
+            changed, self._exp_prev = region_changed(self._exp_prev, crop)
+            if changed:
+                self._last_dmg = time.time()
+                self._exp_hits += 1
+        except Exception:
+            self._exp_roi = None                # 出錯就當作沒有這個訊號
 
     def _sweep_by_damage(self, now):
         """掃蕩的攻擊決策：打得到就站定輸出，打不到就走去找。
@@ -1202,6 +1193,7 @@ class HoldWiggle:
             print(f"  📊 戰績：跑了 {mins:.0f} 分、走了 {self._meter_steps} 步，"
                   f"進帳約 {rate:.0f} 次/小時（近 15 分鐘）"
                   + (f"；跳傷害 {self._dmg_count} 次" if self._dmg_count else "")
+                  + (f"；EXP 進帳 {self._exp_hits} 次" if self._exp_hits else "")
                   + (f"；擋掉 {self._air_skips} 次空揮" if self._air_skips else ""))
 
     SWEEP_RETRY_EVERY = 8.0     # 盲走時每隔幾秒重試一次 edge-guard

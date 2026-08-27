@@ -61,6 +61,8 @@ class ScreenCapture:
                  dry_run=False, synthetic_size=(865, 1370)):
         self.backend = backend
         self.window_title = window_title
+        self.window_found = None        # None＝還沒抓過
+        self._fallback_warned = False
         self._region: Optional[Region] = Region(*region) if region else None
         self._sct = None  # mss 實例（延遲建立）
         # dry_run：不接觸真實螢幕 / mss，改回傳合成畫面，讓主迴圈可在無遊戲、
@@ -105,6 +107,8 @@ class ScreenCapture:
         except Exception:
             pass
 
+        from src.capture.window import is_game_window
+
         user32 = ctypes.windll.user32
         found = []
         keyword = self.window_title
@@ -118,7 +122,31 @@ class ScreenCapture:
                 return True
             buf = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buf, length + 1)
-            if keyword in buf.value:
+            if keyword not in buf.value:
+                return True
+            # 標題命中還不夠：瀏覽器分頁標題常含同樣的字（實測抓到
+            # 「新楓之谷：經典版官方網站 - Google Chrome」），抓下去所有偵測
+            # 都讀在瀏覽器像素上，而錯誤只會說「找不到玩家點」。
+            cls = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, cls, 256)
+            pid = wt.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            exe = ""
+            try:
+                h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+                if h:
+                    n = wt.DWORD(260)
+                    b = ctypes.create_unicode_buffer(260)
+                    if ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                            h, 0, b, ctypes.byref(n)):
+                        exe = b.value.rsplit("\\", 1)[-1]
+                    ctypes.windll.kernel32.CloseHandle(h)
+            except Exception:
+                pass
+            r = wt.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(r))
+            if is_game_window(buf.value, exe, cls.value, keyword,
+                              r.right - r.left, r.bottom - r.top):
                 found.append(hwnd)
                 return False  # 找到就停
             return True
@@ -158,8 +186,18 @@ class ScreenCapture:
 
         region = self._region or self.locate_window()
         if region is not None:
+            self.window_found = True
             raw = self._sct.grab(region.as_dict())
         else:
+            # 指名了視窗卻找不到 → 退回抓整個桌面。這件事必須講出來：
+            # 所有辨識都會讀在桌面像素上而全部失敗，但錯誤訊息只會說
+            # 「找不到玩家點」，實測害人繞很久才發現遊戲根本沒開／抓錯視窗。
+            self.window_found = False
+            if self.window_title and not self._fallback_warned:
+                self._fallback_warned = True
+                print(f"[警告] 找不到標題含「{self.window_title}」的**遊戲**視窗"
+                      f"（瀏覽器分頁等同名視窗會被排除）→ 改抓整個桌面。"
+                      f"所有辨識都會失準，請確認遊戲已開啟。")
             raw = self._sct.grab(self._sct.monitors[1])  # 主螢幕
 
         # mss 回傳 BGRA；取前三通道即為 BGR，供 OpenCV 使用
