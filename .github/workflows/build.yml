@@ -82,10 +82,12 @@ jobs:
           path: dist/MapleAutoPot.exe
 
       - name: Release (latest)
-        if: steps.selftest.outcome == 'success'
-        shell: pwsh
+        if: steps.tests.outcome == 'success' && steps.selftest.outcome == 'success'
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete latest --yes --cleanup-tag 2>$null
-          gh release create latest dist/MapleAutoPot.exe --title "MapleAutoPot（最新版）" --notes "自動打包：${{ github.sha }}" --target ${{ github.sha }}
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/MapleAutoPot.exe --title "MapleAutoPot（最新版）" \
+            --notes "自動打包（Windows 上測試 ${{ steps.tests.outcome }}、exe 自我檢查通過）：${{ github.sha }}" \
+            --target ${{ github.sha }}

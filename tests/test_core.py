@@ -15,7 +15,7 @@ from autopot.guardian import CountTracker, Guardian  # noqa: E402
 from autopot.vision import bar_ratio, find, find_all  # noqa: E402
 
 S = ROOT / "tests" / "samples"
-LABELS = json.loads((S / "labels.json").read_text())
+LABELS = json.loads((S / "labels.json").read_text(encoding="utf-8"))
 SAFETY = {
     "timer_refill_hours": 4, "hp_emergency": 0.35, "hp_emergency_checks": 3,
     "mp_emergency": 0.08, "mp_emergency_checks": 10, "dead_hp": 0.02, "dead_checks": 3,

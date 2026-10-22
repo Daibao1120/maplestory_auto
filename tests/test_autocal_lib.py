@@ -29,7 +29,7 @@ def test_find_scale_on_resized_real_screen(zoom):
 
 
 def test_quickslot_cells_from_reference_pair():
-    cal = json.loads((R / "calibration.json").read_text())["regions"]
+    cal = json.loads((R / "calibration.json").read_text(encoding="utf-8"))["regions"]
     cells = autocal.quickslot_cells(cal["qs_hp"], cal["qs_mp"])
     assert cells["qs_home"] == cal["qs_hp"] and cells["qs_pgup"] == cal["qs_mp"]
     pitch = cal["qs_mp"][0] - cal["qs_hp"][0]

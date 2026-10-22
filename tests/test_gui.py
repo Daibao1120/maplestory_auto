@@ -66,7 +66,7 @@ def gui(tmp_path, monkeypatch):
     ddir = tmp_path / "data"
     ddir.mkdir()
     from autopot.autocal import quickslot_cells
-    c = json.loads((R / "calibration.json").read_text())
+    c = json.loads((R / "calibration.json").read_text(encoding="utf-8"))
     c["regions"].update(quickslot_cells(c["regions"]["qs_hp"], c["regions"]["qs_mp"]))   # 自動校正會存 8 格
     (ddir / "calibration.json").write_text(json.dumps(c))
     monkeypatch.setattr(calib, "ROOT", tmp_path)

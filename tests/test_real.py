@@ -45,7 +45,7 @@ def bot_for(monkeypatch):
 
     def make(name):
         img = cv2.imread(str(R / name))
-        cal = calib.Calibration(json.loads((R / "calibration.json").read_text()))
+        cal = calib.Calibration(json.loads((R / "calibration.json").read_text(encoding="utf-8")))
         b = shopmod.ShopBot(StillWin(img), cal, CFG)
         b._update_shift()
         return b, img

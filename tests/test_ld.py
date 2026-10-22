@@ -270,7 +270,7 @@ def ldworld(tmp_path, monkeypatch):
     clock = rs.Clock()
     monkeypatch.setattr(shopmod, "time", clock)
     shopmod.random.seed(1)
-    pc_cal = json.loads((R / "calibration.json").read_text())
+    pc_cal = json.loads((R / "calibration.json").read_text(encoding="utf-8"))
     up = cv2.imread(str(tdir / "list_up.png"))
 
     def make(shop=SHOP, inv=INV, offset=(0, 0), dry=False, **kw):

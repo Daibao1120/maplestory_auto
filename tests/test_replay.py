@@ -55,10 +55,14 @@ def world(tmp_path, monkeypatch):
     clock = rs.Clock()
     monkeypatch.setattr(shopmod, "time", clock)
     shopmod.random.seed(1)
+    # 參考圖的縮放比例照你電腦（3840 寬螢幕）算，不要用跑測試那台電腦的螢幕寬度（GitHub 的 Windows 主機螢幕很小）
+    from autopot import learn_items
+    meta = json.loads((ROOT / "assets" / "refs" / "refs.json").read_text(encoding="utf-8"))
+    monkeypatch.setattr(learn_items, "_factor", lambda: meta["ref_screen_width"] / meta["native_screen_width"])
 
     def make(shop=SHOP, inv=INV, offset=(0, 0), dry=False, **kw):
         g = rs.RealShop(shop, inv, offset=offset, clock=clock, **kw)
-        cal = calib.Calibration(json.loads((R / "calibration.json").read_text()))
+        cal = calib.Calibration(json.loads((R / "calibration.json").read_text(encoding="utf-8")))
         bot = shopmod.ShopBot(g, cal, CFG, dry_run=dry)
         bot._update_shift()
         return g, bot, clock

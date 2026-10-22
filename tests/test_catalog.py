@@ -44,7 +44,7 @@ def world(tmp_path, monkeypatch):
 
     def make(shop=SHOP, inv=INV, offset=(0, 0), **kw):
         g = rs.RealShop(shop, inv, offset=offset, clock=clock, **kw)
-        c = calib.Calibration(json.loads((R / "calibration.json").read_text()))
+        c = calib.Calibration(json.loads((R / "calibration.json").read_text(encoding="utf-8")))
         bot = shopmod.ShopBot(g, c, CFG)
         bot._update_shift()
         return g, bot, clock
@@ -150,7 +150,7 @@ def test_real_screenshot_rows_and_names():
 def test_real_ld_screenshot_rows():
     """手機版（雷電模擬器）真實截圖：商品清單看得到的 4 列都切得出名稱。"""
     img = cv2.imread(str(ROOT / "tests" / "samples" / "ld" / "ld_shop_open.png"))
-    L = json.loads((ROOT / "ld" / "calibration.json").read_text())["regions"]["shop_list"]
+    L = json.loads((ROOT / "ld" / "calibration.json").read_text(encoding="utf-8"))["regions"]["shop_list"]
     view = img[L[1]:L[1] + L[3], L[0]:L[0] + L[2]]
     bands = cat.row_bands(view, 103.5)
     assert len(bands) == 4, bands

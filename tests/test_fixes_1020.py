@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 from autopot.shop import ShopBot  # noqa: E402
 from autopot.vision import bar_framed  # noqa: E402
 
-CAL = json.loads((ROOT / "tests/samples/real/calibration.json").read_text())["regions"]
+CAL = json.loads((ROOT / "tests/samples/real/calibration.json").read_text(encoding="utf-8"))["regions"]
 MAIN = cv2.imread(str(ROOT / "tests/samples/exp/main_lv191_36.61pct.png"))
 MID = cv2.imread(str(ROOT / "tests/samples/real/shop_mid.png"))
 
