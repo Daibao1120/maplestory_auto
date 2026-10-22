@@ -1,0 +1,81 @@
+376 INFO: PyInstaller: 6.22.3, contrib hooks: 2026.9
+378 INFO: Python: 3.12.10
+460 INFO: Platform: Windows-2025Server-10.0.26100-SP0
+460 INFO: Python environment: C:\hostedtoolcache\windows\Python\3.12.10\x64
+462 INFO: wrote D:\a\maplestory_auto\maplestory_auto\MapleAutoPot.spec
+466 INFO: Removing temporary files and cleaning cache in C:\Users\runneradmin\AppData\Local\pyinstaller
+466 INFO: Module search paths (PYTHONPATH):
+['C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Scripts\\pyinstaller.exe',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\python312.zip',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\DLLs',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64',
+ 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages',
+ 'D:\\a\\maplestory_auto\\maplestory_auto']
+936 INFO: Appending 'datas' from .spec
+939 INFO: checking Analysis
+939 INFO: Building Analysis because Analysis-00.toc is non existent
+939 INFO: Looking for Python shared library...
+939 INFO: Using Python shared library: C:\hostedtoolcache\windows\Python\3.12.10\x64\python312.dll
+939 INFO: Running Analysis Analysis-00.toc
+939 INFO: Target bytecode optimization level: 0
+939 INFO: Initializing module dependency graph...
+940 INFO: Initializing module graph hook caches...
+965 INFO: Analyzing modules for base_library.zip ...
+2538 INFO: Processing standard module hook 'hook-encodings.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+2947 INFO: Processing standard module hook 'hook-math.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+3219 INFO: Processing standard module hook 'hook-heapq.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+4271 INFO: Processing standard module hook 'hook-pickle.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+5929 INFO: Caching module dependency graph...
+5986 INFO: Analyzing D:\a\maplestory_auto\maplestory_auto\gui_main.py
+6060 INFO: Processing pre-find-module-path hook 'hook-tkinter.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_find_module_path'
+6060 INFO: TclTkInfo: initializing cached Tcl/Tk info...
+6510 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+6660 INFO: Processing standard module hook 'hook-numpy.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+7014 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\pre_safe_import_module'
+7014 INFO: SetuptoolsInfo: initializing cached setuptools info...
+8360 INFO: Processing standard module hook 'hook-platform.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+9528 INFO: Processing standard module hook 'hook-sysconfig.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+10744 INFO: Processing standard module hook 'hook-webbrowser.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+11549 INFO: Processing standard module hook 'hook-_ctypes.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12134 INFO: Processing standard module hook 'hook-difflib.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12363 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+12460 INFO: Processing standard module hook 'hook-xml.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+13925 INFO: Processing standard module hook 'hook-cv2.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\stdhooks'
+C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\pyautogui\_pyautogui_x11.py:284: SyntaxWarning: invalid escape sequence '\e'
+  '\e': _display.keysym_to_keycode(Xlib.XK.string_to_keysym('Escape')),
+15121 INFO: Processing module hooks (post-graph stage)...
+15192 INFO: Processing standard module hook 'hook-_tkinter.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks'
+15206 INFO: Performing binary vs. data reclassification (955 entries)
+15619 INFO: Looking for ctypes DLLs
+15747 INFO: Analyzing run-time hooks ...
+15749 INFO: Including run-time hook 'pyi_rth_inspect.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+15753 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+15755 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+15757 INFO: Including run-time hook 'pyi_rth__tkinter.py' from 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks'
+15791 INFO: Creating base_library.zip...
+15810 INFO: Looking for dynamic libraries
+16265 INFO: Extra DLL search directories (AddDllDirectory): ['C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\numpy.libs', 'C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\cv2\\../../x64/vc17/bin']
+16265 INFO: Extra DLL search directories (PATH): ['C:\\hostedtoolcache\\windows\\Python\\3.12.10\\x64\\Lib\\site-packages\\cv2\\../../x64/vc17/bin']
+17260 INFO: Warnings written to D:\a\maplestory_auto\maplestory_auto\build\MapleAutoPot\warn-MapleAutoPot.txt
+17305 INFO: Graph cross-reference written to D:\a\maplestory_auto\maplestory_auto\build\MapleAutoPot\xref-MapleAutoPot.html
+17347 INFO: checking PYZ
+17347 INFO: Building PYZ because PYZ-00.toc is non existent
+17347 INFO: Building PYZ (ZlibArchive) D:\a\maplestory_auto\maplestory_auto\build\MapleAutoPot\PYZ-00.pyz
+17947 INFO: Building PYZ (ZlibArchive) D:\a\maplestory_auto\maplestory_auto\build\MapleAutoPot\PYZ-00.pyz completed successfully.
+17985 INFO: checking PKG
+17985 INFO: Building PKG because PKG-00.toc is non existent
+17985 INFO: Building PKG (CArchive) MapleAutoPot.pkg
+38906 INFO: Building PKG (CArchive) MapleAutoPot.pkg completed successfully.
+38928 INFO: Bootloader C:\hostedtoolcache\windows\Python\3.12.10\x64\Lib\site-packages\PyInstaller\bootloader\Windows-64bit-intel\runw.exe
+38928 INFO: checking EXE
+38928 INFO: Building EXE because EXE-00.toc is non existent
+38928 INFO: Building EXE from EXE-00.toc
+38928 INFO: Copying bootloader EXE to D:\a\maplestory_auto\maplestory_auto\dist\MapleAutoPot.exe
+38932 INFO: Copying icon to EXE
+38934 INFO: Copying 0 resources to EXE
+38934 INFO: Embedding manifest in EXE
+38936 INFO: Appending PKG archive to EXE
+38975 INFO: Fixing EXE headers
+39282 INFO: Building EXE from EXE-00.toc completed successfully.
+39304 INFO: Build complete! The results are available in: D:\a\maplestory_auto\maplestory_auto\dist

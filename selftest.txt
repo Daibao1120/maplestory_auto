@@ -1,0 +1,4 @@
+modules ok
+refs 19
+gui ok (2 buy rows)
+SELFTEST PASS

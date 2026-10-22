@@ -1,0 +1,2 @@
+release not found
+https://github.com/Daibao1120/maplestory_auto/releases/tag/latest
