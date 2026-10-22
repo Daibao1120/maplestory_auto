@@ -1,0 +1,87 @@
+{
+ "window_size": [
+  1920,
+  1080
+ ],
+ "regions": {
+  "hp_bar": [
+   272,
+   1044,
+   272,
+   35
+  ],
+  "mp_bar": [
+   553,
+   1044,
+   272,
+   35
+  ],
+  "qs_hp": [
+   1650,
+   690,
+   100,
+   100
+  ],
+  "qs_mp": [
+   1650,
+   800,
+   100,
+   100
+  ],
+  "shop_list": [
+   335,
+   413,
+   518,
+   414
+  ],
+  "inv_list": [
+   931,
+   413,
+   518,
+   414
+  ],
+  "qty_input": [
+   633,
+   488,
+   592,
+   40
+  ]
+ },
+ "anchors": {
+  "inv_tab_cash": {
+   "tpl": "inv_open",
+   "dx": 385,
+   "dy": 71
+  },
+  "shop_tab_use": {
+   "tpl": "shop_leave",
+   "dx": 377,
+   "dy": 179
+  },
+  "qty_input": {
+   "tpl": "qty_dialog",
+   "dx": -1,
+   "dy": 55
+  },
+  "inv_tab_cash@inv_tabs": {
+   "tpl": "inv_tabs",
+   "dx": 300,
+   "dy": 22
+  }
+ },
+ "shop_leave_pos": [
+  702,
+  188
+ ],
+ "note": "雷電模擬器 1920x1080（平板版）。由 tests/samples/ld 的原始截圖量出來的。",
+ "offsets": {
+  "shop_leave-shop_sell": [
+   -617,
+   -19
+  ],
+  "shop_buy-shop_leave": [
+   0,
+   57
+  ]
+ }
+}

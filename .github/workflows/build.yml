@@ -1,0 +1,91 @@
+# 每次推上來：在 Windows 上跑全部測試 → 打包 MapleAutoPot.exe → 自我檢查 → 放到 Releases（latest）
+# 測試和自我檢查的結果另外推到 ci-results 分支（方便從別的地方讀）
+name: build-exe
+
+on:
+  push:
+    branches: [autopot]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest pytest-xdist
+          # 打包用 headless 版的 OpenCV（沒有視窗介面的部分，exe 小很多）
+          pip uninstall -y opencv-python
+          pip install opencv-python-headless
+
+      - name: Tests
+        id: tests
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ci | Out-Null
+          python -m pytest -q -n 4 -p no:cacheprovider tests/ 2>&1 | Tee-Object -FilePath ci/tests.txt
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build exe
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name MapleAutoPot `
+            --add-data "assets;assets" `
+            --hidden-import keyboard --hidden-import pyautogui --hidden-import mss `
+            gui_main.py 2>&1 | Tee-Object -FilePath ci/build.txt
+          Get-Item dist/MapleAutoPot.exe | Format-List Name,Length
+
+      - name: Self-test exe
+        id: selftest
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist/MapleAutoPot.exe -ArgumentList "--selftest" -PassThru -Wait
+          Get-Content dist/selftest.txt | Tee-Object -FilePath ci/selftest.txt
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: Publish results to ci-results branch
+        if: always()
+        shell: pwsh
+        run: |
+          $sha = "${{ github.sha }}"
+          "sha=$sha`ntests=${{ steps.tests.outcome }}`nselftest=${{ steps.selftest.outcome }}" | Out-File -Encoding utf8 ci/status.txt
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          Copy-Item -Recurse ci $env:RUNNER_TEMP/ci
+          git fetch origin ci-results 2>$null
+          git checkout --orphan ci-results-tmp
+          git rm -rf --cached . | Out-Null
+          Get-ChildItem -Force | Where-Object { $_.Name -ne ".git" } | Remove-Item -Recurse -Force
+          Copy-Item -Recurse $env:RUNNER_TEMP/ci/* .
+          git add -A
+          git commit -m "CI results for $sha"
+          git push -f origin HEAD:ci-results
+
+      - name: Upload exe (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MapleAutoPot
+          path: dist/MapleAutoPot.exe
+
+      - name: Release (latest)
+        if: steps.selftest.outcome == 'success'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag 2>$null
+          gh release create latest dist/MapleAutoPot.exe --title "MapleAutoPot（最新版）" --notes "自動打包：${{ github.sha }}" --target ${{ github.sha }}

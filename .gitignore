@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+/data/
+/data_ld/
+/templates/
+/dist/
+/build/
+*.spec
+selftest.txt
+settings.yaml
+.venv/
+/ci/

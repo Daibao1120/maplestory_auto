@@ -1,0 +1,118 @@
+# ============================================================
+#  楓之谷自動補水 設定檔
+#  改完存檔後重新執行 run.py 才會生效
+# ============================================================
+
+# 遊戲視窗標題要包含的文字
+window_title: "MapleStory Worlds-玩樂宇宙"
+# 標題含有這些字的視窗不要抓（例如啟動器）
+window_exclude: []
+
+# 你現在幾等（用來預估「到 200 等」要多久）。
+# 程式會自己從畫面左下角讀等級（讀得到就以畫面為準），這個數字只在讀不到時才用。
+level: 197
+
+# 同時幫雷電模擬器（手機版）的角色補水：start.bat 會一起啟動 run_ld.py（設定在 config_ld.yaml）
+# 模擬器用 ADB 在背景點擊，不會跟電腦版搶滑鼠
+emulator:
+  enabled: true
+
+# 每幾秒檢查一次畫面
+check_interval_sec: 2
+
+# 快捷欄數字辨識（讀馴鹿奶、刨冰剩幾個）
+# 開啟時：數量低於 refill_below 就提早去補，而且只買「補到 target」需要的數量；
+#         讀不到（被擋住、格子被選取）超過 2 分鐘就自動改回定時補貨。
+#         不管有沒有開，每隔 safety.timer_refill_hours 小時都會去一次（順便賣東西），
+#         HP/MP 條的緊急補貨保護也一直都在。
+# 關閉時：每隔 safety.timer_refill_hours 小時固定買 fallback_buy 的數量。
+ocr_enabled: true
+
+# ---------------- 要買的補品 ----------------
+# template: 校正時存的商品模板名稱（templates/ 資料夾裡的檔名，不含 .png）
+# quickslot: 這個補品在快捷欄的哪一格（對應校正的 qs_hp / qs_mp 區域）
+# target:    補貨時補到多少個
+# refill_below: 剩下低於多少個就去補貨
+# fallback_buy: 每次定時補貨固定買多少（預設約等於 3 小時用量再多 10%）
+buy:
+  hp:
+    name: 馴鹿奶
+    template: buy_milk
+    quickslot: qs_hp
+    target: 6750
+    refill_below: 1500
+    fallback_buy: 3200      # 馴鹿奶每小時約用 960 個 x 3 小時 x 1.1
+  mp:
+    name: 紅豆刨冰
+    template: buy_ice
+    quickslot: qs_mp
+    target: 850
+    refill_below: 200
+    fallback_buy: 400       # 刨冰每小時約用 118 個 x 3 小時 x 1.1
+
+# 單次購買上限（遊戲數量框的上限）
+max_per_purchase: 9999
+
+# ---------------- 要賣的東西（白名單） ----------------
+# 只會賣「列在這裡、而且模板完全符合」的道具；沒列的一律不碰。
+# 先用 calibrate.py sell <模板名> 截取道具圖示，再加到這裡。
+# keep_stacks: 保留幾組不賣（留的是背包裡最上面那幾組）
+sell_enabled: true          # 補貨前先賣掉下面這些（賣完馬上買，空格才不會被撿到的東西佔掉）
+sell:
+  # 背包裡現在沒有的道具會先跳過，之後撿到時程式會自動學它的樣子
+  - template: sell_special
+    name: 特殊藥水
+    keep_stacks: 0
+  - template: sell_vitality
+    name: 活力藥水
+    keep_stacks: 0
+  - template: sell_elixir
+    name: 萬能療傷藥
+    keep_stacks: 1
+  - template: sell_super
+    name: 超級藥水
+    keep_stacks: 1
+sell_threshold: 0.93         # 賣東西時圖片比對的門檻（比買東西嚴格，避免賣錯）
+
+# ---------------- 安全機制 ----------------
+safety:
+  # 定時補貨：每隔幾小時補一次（買 fallback_buy 的數量）
+  timer_refill_hours: 3
+  # HP 低於這個比例、而且持續幾次檢查 → 判斷補品可能用完，立刻緊急補貨
+  # ⚠ 一定要「低於」遊戲裡自動喝 HP 水的百分比，否則正常喝水時也會一直觸發
+  hp_emergency: 0.35
+  hp_emergency_checks: 3
+  # MP 低於這個比例持續幾次 → 緊急補貨（MP 用技能會短暫掉，所以次數設多一點）
+  mp_emergency: 0.08
+  mp_emergency_checks: 10
+  # HP 幾乎歸零持續幾次 → 判斷角色死亡，發出警報並停止所有操作
+  dead_hp: 0.02
+  dead_checks: 3
+  # 兩次補貨至少間隔幾秒（避免一直開商店）
+  min_refill_gap_sec: 120
+  # 緊急補貨後幾秒內還是危險 → 發出最高等級警報
+  emergency_recheck_sec: 60
+  # 補貨失敗重試次數，超過就警報
+  max_refill_failures: 3
+  # 你最近幾秒內有動滑鼠，就先延後「非緊急」的補貨（避免搶你的滑鼠）
+  defer_if_user_active_sec: 60   # 你最近 60 秒有動滑鼠、或在別的視窗打字 → 定時補貨先等一下（HP 危險時不等）
+  # 數字一次減少超過這麼多，視為辨識錯誤（每秒最多用掉幾個 x 經過秒數 + 這個緩衝）
+  max_use_per_sec: 3
+  ocr_jump_buffer: 60
+
+# ---------------- 通知 ----------------
+notify:
+  beep: true                 # 電腦發出嗶聲
+  # Discord Webhook 網址（選填）。在 Discord 頻道設定 → 整合 → Webhook 建立後貼上
+  discord_webhook: ""
+  # 每隔幾分鐘回報一次狀態到 Discord（0 = 不回報）
+  status_every_min: 60
+
+# ---------------- 其他 ----------------
+match_threshold: 0.85        # 圖片比對的相似度門檻（0~1，越高越嚴格）
+close_inventory_after: true  # 補完貨後把道具欄收起來
+arrange_windows: true        # 啟動時把遊戲移到螢幕右邊、命令視窗放左邊（不改遊戲大小）
+hotkeys:
+  pause: f9                  # 暫停 / 繼續
+  refill_now: f10            # 立刻補貨一次
+  quit: f12                  # 結束程式

@@ -1,0 +1,85 @@
+# ============================================================
+#  雷電模擬器（手機版）角色 die7 的自動補水設定
+#  用 ld_start.bat 啟動。改完存檔後要重開 ld_start.bat 才會生效
+#  跟電腦版的 config.yaml 分開：兩個可以同時跑（模擬器用 ADB，不會搶滑鼠）
+# ============================================================
+
+# ---------------- 模擬器連線 ----------------
+# 雷電模擬器資料夾裡的 adb.exe（雷電模擬器要打開「設定 → 其他 → ADB 偵錯：開啟本地連接」）
+adb_path: 'F:\ldplayer\ldplayer9\adb.exe'
+# 第一個模擬器是 emulator-5554；多開的第二個是 emulator-5556，以此類推
+adb_serial: emulator-5554
+
+# 手機版的操作方式（不要改）
+touch: true
+row_ratio: 0.25          # 清單只看上面 4 列（第 5 列被下方工具列擋住）
+arrow_dy: 488            # 捲軸 ▲ 到 ▼ 的距離（▼ 被工具列擋住一半，用 ▲ 推算位置）
+hud_top: 912             # 下方工具列的上緣：清單的東西在這以下就不點（改用拖滑塊捲動）。實測點 ▼ 露出來的 y=907 有效
+close_inventory_after: false
+
+# 每幾秒檢查一次畫面
+check_interval_sec: 3
+
+# 快捷欄數字辨識：手機版的快捷欄長得不一樣，先不開（靠定時補貨 + HP 條的緊急補貨）
+ocr_enabled: false
+
+# 等級（die7 已經 200 等，不用預估升等）
+level: 200
+
+# ---------------- 要買的補品 ----------------
+buy:
+  hp:
+    name: 馴鹿奶
+    template: buy_milk
+    quickslot: qs_hp
+    target: 3000
+    refill_below: 800
+    fallback_buy: 1500      # 每 3 小時固定買這麼多（10/21 實測 die7 每小時約用 350 個 x 3 小時 x 1.4）
+
+max_per_purchase: 9999
+
+# ---------------- 要賣的東西（白名單，跟電腦版一樣） ----------------
+sell_enabled: true
+sell:
+  - template: sell_special
+    name: 特殊藥水
+    keep_stacks: 0
+  - template: sell_vitality
+    name: 活力藥水
+    keep_stacks: 0
+  - template: sell_elixir
+    name: 萬能療傷藥
+    keep_stacks: 1
+  - template: sell_super
+    name: 超級藥水
+    keep_stacks: 1
+sell_threshold: 0.93
+
+# ---------------- 安全機制 ----------------
+safety:
+  timer_refill_hours: 3
+  hp_emergency: 0.35
+  hp_emergency_checks: 3
+  mp_emergency: 0          # 手機版不買 MP 水 → 不做 MP 緊急補貨
+  mp_emergency_checks: 10
+  dead_hp: 0.02
+  dead_checks: 3
+  min_refill_gap_sec: 120
+  emergency_recheck_sec: 60
+  max_refill_failures: 3
+  defer_if_user_active_sec: 0   # 模擬器不用你的滑鼠，不用等你
+  max_use_per_sec: 3
+  ocr_jump_buffer: 60
+
+# ---------------- 通知 ----------------
+notify:
+  beep: true
+  discord_webhook: ""
+  status_every_min: 60
+
+# ---------------- 其他 ----------------
+match_threshold: 0.85
+hotkeys:                     # 跟電腦版錯開（電腦版是 F9 / F10 / F12）
+  pause: ctrl+f9
+  refill_now: ctrl+f10
+  quit: ctrl+f12
