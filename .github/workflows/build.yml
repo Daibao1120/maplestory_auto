@@ -57,12 +57,32 @@ jobs:
           Get-Content dist/selftest.txt | Tee-Object -FilePath ci/selftest.txt
           if ($p.ExitCode -ne 0) { exit 1 }
 
+      - name: Upload exe (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MapleAutoPot
+          path: dist/MapleAutoPot.exe
+
+      - name: Release (latest)
+        id: release
+        if: steps.tests.outcome == 'success' && steps.selftest.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          { gh release delete latest --yes --cleanup-tag || true; } 2>&1 | tee ci/release.txt
+          gh release create latest dist/MapleAutoPot.exe --title "MapleAutoPot（最新版）" \
+            --notes "自動打包（Windows 上全部測試通過、exe 自我檢查通過）：${{ github.sha }}" \
+            --target ${{ github.sha }} 2>&1 | tee -a ci/release.txt
+
       - name: Publish results to ci-results branch
         if: always()
         shell: pwsh
         run: |
           $sha = "${{ github.sha }}"
-          "sha=$sha`ntests=${{ steps.tests.outcome }}`nselftest=${{ steps.selftest.outcome }}" | Out-File -Encoding utf8 ci/status.txt
+          "sha=$sha`ntests=${{ steps.tests.outcome }}`nselftest=${{ steps.selftest.outcome }}`nrelease=${{ steps.release.outcome }}" | Out-File -Encoding utf8 ci/status.txt
           git config user.name "ci-bot"
           git config user.email "ci-bot@users.noreply.github.com"
           Copy-Item -Recurse ci $env:RUNNER_TEMP/ci
@@ -74,20 +94,3 @@ jobs:
           git add -A
           git commit -m "CI results for $sha"
           git push -f origin HEAD:ci-results
-
-      - name: Upload exe (artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: MapleAutoPot
-          path: dist/MapleAutoPot.exe
-
-      - name: Release (latest)
-        if: steps.tests.outcome == 'success' && steps.selftest.outcome == 'success'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest dist/MapleAutoPot.exe --title "MapleAutoPot（最新版）" \
-            --notes "自動打包（Windows 上測試 ${{ steps.tests.outcome }}、exe 自我檢查通過）：${{ github.sha }}" \
-            --target ${{ github.sha }}
